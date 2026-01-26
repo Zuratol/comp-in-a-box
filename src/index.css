@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+}
+
+body {
+  background: #0f172a; /* slate-900 */
+  color: #f8fafc;
+  overflow-x: hidden;
+}
+
+/* Center the app inside the root */
+#root {
+  display: flex;
+  justify-content: center;   /* horizontal center */
+  align-items: flex-start;   /* top-aligned */
+  padding: 16px;
+}
+
+/* Your App's outermost div */
+#root > * {
+  width: 100%;
+  max-width: 420px;
+}
