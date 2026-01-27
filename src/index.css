@@ -2,28 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
-html, body, #root {
-  height: 100%;
-  width: 100%;
+* {
   margin: 0;
+  padding: 0;
+  box-sizing: border-box;
 }
 
 body {
-  background: #0f172a; /* slate-900 */
-  color: #f8fafc;
-  overflow-x: hidden;
-}
-
-/* Center the app inside the root */
-#root {
-  display: flex;
-  justify-content: center;   /* horizontal center */
-  align-items: flex-start;   /* top-aligned */
-  padding: 16px;
-}
-
-/* Your App's outermost div */
-#root > * {
-  width: 100%;
-  max-width: 420px;
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
