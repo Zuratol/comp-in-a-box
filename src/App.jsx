@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Plus, Trash2, Users, Trophy, Home, ChevronLeft, Copy, Check, Settings, Mountain } from "lucide-react";
 
-// Simple speech helper
+// Speech helper
 function speak(text) {
   if (typeof window === "undefined") return;
   if (!("speechSynthesis" in window)) return;
@@ -17,1756 +18,1189 @@ function formatTime(seconds) {
 }
 
 const PHASES = {
-  PRECLIMB: "preclimb",
+  READY: "ready",
   CLIMB: "climb",
   SCORE: "score",
   REST: "rest",
   DONE: "done",
 };
 
-function phaseLabel(phase) {
-  switch (phase) {
-    case PHASES.PRECLIMB:
-      return "Pre-Climb";
-    case PHASES.CLIMB:
-      return "Climbing";
-    case PHASES.SCORE:
-      return "Scoring";
-    case PHASES.REST:
-      return "Rest";
-    case PHASES.DONE:
-      return "Done";
-    default:
-      return String(phase || "");
-  }
+const HOLD_ORDER = ["start", "five", "ten", "fifteen", "twenty", "top"];
+const HOLD_LABELS = { start: "S", five: "5", ten: "10", fifteen: "15", twenty: "20", top: "T" };
+const HOLD_SCORES = { start: 0, five: 5, ten: 10, fifteen: 15, twenty: 20, top: 25 };
+
+function computeScore(highestHold, attempts) {
+  const baseScore = HOLD_SCORES[highestHold] || 0;
+  const penalty = Math.min(10, attempts) * 0.1;
+  return Math.max(0, Number((baseScore - penalty).toFixed(1)));
 }
 
-const HOLD_ORDER = ["start", "five", "ten", "fifteen", "twenty", "twentyFive"];
-const HOLD_LABELS = {
-  start: "S",
-  five: "5",
-  ten: "10",
-  fifteen: "15",
-  twenty: "20",
-  twentyFive: "25",
-};
-
-const SCORE_CHOICES = [0, 5, 10, 15, 20, 25];
-const MAX_ATTEMPTS = 10;
-const ATTEMPT_PENALTY_PER_ATTEMPT = 0.01;
-
-function clampInt(n, min, max) {
-  const x = Number.isFinite(Number(n)) ? Math.floor(Number(n)) : 0;
-  return Math.max(min, Math.min(max, x));
+function computeTotal(boulders) {
+  return boulders.reduce((sum, b) => sum + computeScore(b.highestHold, b.attempts), 0).toFixed(1);
 }
 
-function computeBoulderEffective(score, attempts) {
-  const s = clampInt(score, 0, 25);
-  const a = clampInt(attempts, 0, MAX_ATTEMPTS);
-  const eff = s - a * ATTEMPT_PENALTY_PER_ATTEMPT;
-  return eff < 0 ? 0 : Number(eff.toFixed(2));
-}
-
-function computeTotal(scores, attempts) {
-  let sum = 0;
-  for (let i = 0; i < 4; i++) sum += computeBoulderEffective(scores[i] || 0, attempts[i] || 0);
-  return Number(sum.toFixed(2));
-}
-
-// Share code helpers (base64 of URI-encoded JSON)
 function toShareCode(obj) {
-  const json = JSON.stringify(obj);
-  const uri = encodeURIComponent(json);
-  return btoa(uri);
+  return btoa(encodeURIComponent(JSON.stringify(obj)));
 }
 
 function fromShareCode(code) {
-  const uri = atob(String(code || "").trim());
-  const json = decodeURIComponent(uri);
-  return JSON.parse(json);
+  return JSON.parse(decodeURIComponent(atob(String(code || "").trim())));
 }
-
-// Minimal self-tests (no framework here)
-(function runSelfTests() {
-  try {
-    console.assert(formatTime(0) === "00:00", "formatTime 0");
-    console.assert(formatTime(65) === "01:05", "formatTime 65");
-    console.assert(computeBoulderEffective(25, 10) === 24.9, "penalty max");
-    const sample = { a: 1, name: "tilted earth" };
-    const back = fromShareCode(toShareCode(sample));
-    console.assert(back.a === 1 && back.name === "tilted earth", "share encode/decode");
-  } catch (e) {
-    // eslint-disable-next-line no-console
-    console.warn("Self-tests failed:", e);
-  }
-})();
-
-const initialTemplates = [];
 
 export default function App() {
   const [screen, setScreen] = useState("home");
-  const [templates, setTemplates] = useState(initialTemplates);
-  const [activeTemplate, setActiveTemplate] = useState(null);
-  const [playerName, setPlayerName] = useState("");
-  const [liveConfig, setLiveConfig] = useState(null);
+  const [comps, setComps] = useState([]);
+  const [activeComp, setActiveComp] = useState(null);
+  const [activeSession, setActiveSession] = useState(null);
 
+  // Load comps from localStorage
   useEffect(() => {
     try {
-      const stored = localStorage.getItem("compTemplates");
-      if (stored) setTemplates(JSON.parse(stored));
+      const stored = localStorage.getItem("comps");
+      if (stored) setComps(JSON.parse(stored));
     } catch {}
   }, []);
 
+  // Save comps to localStorage
   useEffect(() => {
     try {
-      localStorage.setItem("compTemplates", JSON.stringify(templates));
+      localStorage.setItem("comps", JSON.stringify(comps));
     } catch {}
-  }, [templates]);
+  }, [comps]);
 
-  const globalLeaderboard = useMemo(() => {
-    const sessions = [];
-    templates.forEach((t) => {
-      (t.sessions || []).forEach((s) => sessions.push({ ...s, templateName: t.name }));
-    });
-    sessions.sort((a, b) => (b.totalScore || 0) - (a.totalScore || 0));
-    return sessions.slice(0, 10);
-  }, [templates]);
-
-  const handleTemplateCreated = (template) => {
-    setTemplates((prev) => [...prev, template]);
-    setActiveTemplate(template);
-    setScreen("run-new-template");
-  };
-
-  const handleSessionSaved = (templateId, session) => {
-    setTemplates((prev) =>
-      prev.map((t) => {
-        if (t.id !== templateId) return t;
-        return { ...t, sessions: [...(t.sessions || []), session] };
+  const saveSession = (compId, session) => {
+    setComps((prev) =>
+      prev.map((c) => {
+        if (c.id !== compId) return c;
+        return { ...c, sessions: [...(c.sessions || []), session] };
       })
     );
   };
 
-  const handleImportShareCode = (code) => {
-    const payload = fromShareCode(code);
-    if (!payload || !payload.template) throw new Error("Invalid share code");
-
-    const importedTemplate = {
-      ...payload.template,
-      id: `t-import-${Date.now()}`,
-      createdAt: new Date().toISOString(),
-      sessions: payload.template.sessions || [],
-    };
-
-    setTemplates((prev) => [...prev, importedTemplate]);
-    setActiveTemplate(importedTemplate);
-    setScreen("run-shared");
+  const deleteComp = (compId) => {
+    setComps((prev) => prev.filter((c) => c.id !== compId));
   };
 
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-50 flex flex-col items-center p-4">
-      <div className="w-full max-w-md">
-        <header className="mb-4 text-center">
-          <h1 className="text-2xl font-bold">Comp in a Box</h1>
-          <p className="text-xs text-slate-300">4-boulder mini comps. Share a code. Chase the ghost.</p>
-        </header>
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-emerald-900/20 via-transparent to-transparent"></div>
+      <div className="relative min-h-screen">
+        <div className="max-w-2xl mx-auto px-4 py-6">
+          {screen === "home" && (
+            <HomeScreen
+              comps={comps}
+              onNewComp={() => setScreen("create")}
+              onRunComp={(comp) => {
+                setActiveComp(comp);
+                setScreen("pre-run");
+              }}
+              onImport={(comp) => {
+                setComps((prev) => [...prev, comp]);
+                setActiveComp(comp);
+                setScreen("pre-run");
+              }}
+              onDeleteComp={deleteComp}
+            />
+          )}
 
-        {screen === "home" && (
-          <HomeScreen
-            templates={templates}
-            globalLeaderboard={globalLeaderboard}
-            onStartNew={() => setScreen("setup")}
-            onStartLive={() => setScreen("live-setup")}
-            onRunShared={(t) => {
-              setActiveTemplate(t);
-              setScreen("run-shared");
-            }}
-            onImportShareCode={handleImportShareCode}
-            onClearLeaderboard={() => {
-              setTemplates((prev) => prev.map((t) => ({ ...t, sessions: [] })));
-            }}
-            onClearTemplates={() => {
-              setTemplates([]);
-              setActiveTemplate(null);
-            }}
-          />
-        )}
+          {screen === "create" && (
+            <CreateCompScreen
+              onBack={() => setScreen("home")}
+              onCreate={(comp) => {
+                setComps((prev) => [...prev, comp]);
+                setActiveComp(comp);
+                setScreen("pre-run");
+              }}
+            />
+          )}
 
-        {screen === "setup" && (
-          <SetupWizard
-            onCancel={() => setScreen("home")}
-            onTemplateCreated={handleTemplateCreated}
-            playerName={playerName}
-            setPlayerName={setPlayerName}
-          />
-        )}
+          {screen === "pre-run" && activeComp && (
+            <PreRunScreen
+              comp={activeComp}
+              onBack={() => {
+                setActiveComp(null);
+                setScreen("home");
+              }}
+              onStartRun={(playerNames) => {
+                const sessions = playerNames.map(name => ({
+                  id: `session-${Date.now()}-${Math.random()}`,
+                  compId: activeComp.id,
+                  compName: activeComp.name,
+                  playerName: name,
+                  startedAt: new Date().toISOString(),
+                  boulders: activeComp.boulders.map(() => ({ highestHold: null, attempts: 1 })),
+                }));
+                setActiveSession(sessions);
+                setScreen("run");
+              }}
+            />
+          )}
 
-        {screen === "run-new-template" && activeTemplate && (
-          <CompRunner
-            template={activeTemplate}
-            playerName={playerName}
-            mode="new"
-            onHome={() => setScreen("home")}
-            onDone={(session) => {
-              if (session) handleSessionSaved(activeTemplate.id, session);
-              setScreen("home");
-            }}
-          />
-        )}
-
-        {screen === "run-shared" && activeTemplate && (
-          <SharedCompRunner
-            template={activeTemplate}
-            onCancel={() => setScreen("home")}
-            onDone={(session) => {
-              if (session && !session.__start) handleSessionSaved(activeTemplate.id, session);
-              setScreen("home");
-            }}
-          />
-        )}
-
-        {screen === "live-setup" && (
-          <LiveCompSetup
-            onCancel={() => setScreen("home")}
-            onStart={(cfg) => {
-              setLiveConfig(cfg);
-              setScreen("live-run");
-            }}
-          />
-        )}
-
-        {screen === "live-run" && liveConfig && (
-          <LiveCompRunner
-            config={liveConfig}
-            onHome={() => {
-              setLiveConfig(null);
-              setScreen("home");
-            }}
-          />
-        )}
+          {screen === "run" && activeComp && activeSession && (
+            <RunScreen
+              comp={activeComp}
+              sessions={activeSession}
+              onUpdateSessions={setActiveSession}
+              onComplete={(completedSessions) => {
+                completedSessions.forEach(session => {
+                  saveSession(activeComp.id, session);
+                });
+                setActiveSession(null);
+                setActiveComp(null);
+                setScreen("home");
+              }}
+              onExit={() => {
+                setActiveSession(null);
+                setActiveComp(null);
+                setScreen("home");
+              }}
+            />
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-function HomeScreen({
-  templates,
-  globalLeaderboard,
-  onStartNew,
-  onStartLive,
-  onRunShared,
-  onImportShareCode,
-  onClearLeaderboard,
-  onClearTemplates,
-}) {
-  const [selected, setSelected] = useState("");
+function HomeScreen({ comps, onNewComp, onRunComp, onImport, onDeleteComp }) {
   const [shareCode, setShareCode] = useState("");
-  const [importErr, setImportErr] = useState("");
+  const [importError, setImportError] = useState("");
+  const [showImport, setShowImport] = useState(false);
 
-  const template = templates.find((t) => t.id === selected) || null;
-
-  return (
-    <div className="space-y-4">
-      <button className="w-full py-3 rounded-lg bg-emerald-500 text-slate-900 font-semibold" onClick={onStartNew} type="button">
-        Start a New Comp
-      </button>
-      <button className="w-full py-2 rounded-lg bg-orange-500 text-slate-900 font-semibold" onClick={onStartLive} type="button">
-        Start a Live Comp
-      </button>
-
-      <div className="flex gap-2">
-        <select
-          className="flex-1 bg-slate-800 rounded-lg p-2 text-sm"
-          value={selected}
-          onChange={(e) => setSelected(e.target.value)}
-        >
-          <option value="">Select shared comp</option>
-          {templates.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.name}
-            </option>
-          ))}
-        </select>
-        <button
-          disabled={!template}
-          className="px-3 py-2 rounded-lg bg-indigo-500 text-xs font-semibold disabled:opacity-40"
-          onClick={() => template && onRunShared(template)}
-          type="button"
-        >
-          Run
-        </button>
-      </div>
-
-      <div className="bg-slate-800 rounded-lg p-3 space-y-2">
-        <h3 className="text-sm font-semibold">Run from Share Code</h3>
-        <textarea
-          className="w-full bg-slate-900 rounded-lg p-2 text-xs min-h-[76px]"
-          placeholder="Paste a share code here"
-          value={shareCode}
-          onChange={(e) => {
-            setImportErr("");
-            setShareCode(e.target.value);
-          }}
-        />
-        {importErr && <div className="text-xs text-red-400">{importErr}</div>}
-        <button
-          className="w-full py-2 rounded-lg bg-emerald-500 text-slate-900 text-sm font-semibold disabled:opacity-40"
-          disabled={!shareCode.trim()}
-          onClick={() => {
-            try {
-              onImportShareCode(shareCode);
-              setShareCode("");
-              setImportErr("");
-            } catch {
-              setImportErr("That code looks cursed. Try a different one.");
-            }
-          }}
-          type="button"
-        >
-          Import & Run
-        </button>
-        <p className="text-[10px] text-slate-400">Heads up: share codes include images (big).</p>
-      </div>
-
-      <div className="bg-slate-800 rounded-lg p-3 space-y-2">
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold">Global Leaderboard</h3>
-          <button
-            className="text-[10px] px-2 py-1 rounded-md bg-slate-900 text-slate-300 disabled:opacity-40"
-            onClick={() => onClearLeaderboard && onClearLeaderboard()}
-            type="button"
-            disabled={globalLeaderboard.length === 0}
-          >
-            Clear leaderboard
-          </button>
-        </div>
-        {globalLeaderboard.length === 0 ? (
-          <p className="text-xs text-slate-400">No sessions yet.</p>
-        ) : (
-          <ol className="space-y-1 text-xs">
-            {globalLeaderboard.map((s, i) => (
-              <li key={s.id} className="flex justify-between">
-                <span>
-                  {i + 1}. {s.playerName} – {s.totalScore}
-                </span>
-                <span className="text-slate-400 truncate max-w-[140px] text-right">{s.templateName}</span>
-              </li>
-            ))}
-          </ol>
-        )}
-      </div>
-
-      <div className="bg-slate-800 rounded-lg p-3 space-y-2">
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold">Saved Comps</h3>
-          <button
-            className="text-[10px] px-2 py-1 rounded-md bg-slate-900 text-slate-300 disabled:opacity-40"
-            onClick={() => {
-              onClearTemplates && onClearTemplates();
-              setSelected("");
-            }}
-            type="button"
-            disabled={templates.length === 0}
-          >
-            Clear comps
-          </button>
-        </div>
-        <p className="text-[10px] text-slate-400">This removes saved comp templates on this device.</p>
-      </div>
-    </div>
-  );
-}
-
-function BoulderImage({ imageUrl, holds, onClick, clickable }) {
-  if (!imageUrl) return null;
-  return (
-    <div
-      className="relative w-full pt-[100%] bg-slate-800 rounded-lg overflow-hidden"
-      onClick={clickable ? onClick : undefined}
-    >
-      <img src={imageUrl} alt="Boulder" className="absolute inset-0 w-full h-full object-cover" />
-      {holds &&
-        Object.entries(holds).map(([k, p]) =>
-          p ? (
-            <div
-              key={k}
-              className="absolute w-6 h-6 rounded-full bg-emerald-500/80 flex items-center justify-center text-[10px] font-bold text-slate-900 border border-slate-900"
-              style={{ left: `${p.x * 100}%`, top: `${p.y * 100}%`, transform: "translate(-50%, -50%)" }}
-            >
-              {HOLD_LABELS[k]}
-            </div>
-          ) : null
-        )}
-    </div>
-  );
-}
-
-function SetupWizard({ onCancel, onTemplateCreated, playerName, setPlayerName }) {
-  const [gymName, setGymName] = useState("");
-  const [boulders, setBoulders] = useState(
-    [0, 1, 2, 3].map((i) => ({
-      id: `b${i}`,
-      index: i + 1,
-      name: `Boulder ${i + 1}`,
-      imageUrl: "",
-      holds: { start: null, five: null, ten: null, fifteen: null, twenty: null, twentyFive: null },
-    }))
-  );
-
-  const ready = (b) =>
-    !!(
-      b &&
-      b.holds &&
-      b.holds.start &&
-      b.holds.twentyFive &&
-      (b.holds.five || b.holds.ten || b.holds.fifteen || b.holds.twenty)
-    );
-
-  const allReady = boulders.every(ready);
-
-  const setHold = (i, e) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    const x = (e.clientX - r.left) / r.width;
-    const y = (e.clientY - r.top) / r.height;
-    setBoulders((prev) => {
-      const c = [...prev];
-      const h = { ...c[i].holds };
-      const k = HOLD_ORDER.find((key) => !h[key]);
-      if (!k) return prev;
-      h[k] = { x, y };
-      c[i] = { ...c[i], holds: h };
-      return c;
+  const allSessions = useMemo(() => {
+    const sessions = [];
+    comps.forEach((c) => {
+      (c.sessions || []).forEach((s) => sessions.push(s));
     });
-  };
+    return sessions.sort((a, b) => {
+      const aTotal = parseFloat(computeTotal(a.boulders));
+      const bTotal = parseFloat(computeTotal(b.boulders));
+      return bTotal - aTotal;
+    }).slice(0, 10);
+  }, [comps]);
 
-  const setImage = (i, e) => {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    const r = new FileReader();
-    r.onload = (ev) =>
-      setBoulders((p) => {
-        const c = [...p];
-        c[i] = { ...c[i], imageUrl: String(ev.target.result) };
-        return c;
-      });
-    r.readAsDataURL(f);
-  };
-
-  const resetHolds = (i) => {
-    setBoulders((p) => {
-      const c = [...p];
-      c[i] = {
-        ...c[i],
-        holds: { start: null, five: null, ten: null, fifteen: null, twenty: null, twentyFive: null },
+  const handleImport = () => {
+    try {
+      const payload = fromShareCode(shareCode);
+      if (!payload || !payload.comp) throw new Error("Invalid");
+      
+      const imported = {
+        ...payload.comp,
+        id: `comp-${Date.now()}`,
+        importedAt: new Date().toISOString(),
+        sessions: [],
       };
-      return c;
+      
+      onImport(imported);
+      setShareCode("");
+      setShowImport(false);
+      setImportError("");
+    } catch {
+      setImportError("Invalid share code. Please check and try again.");
+    }
+  };
+
+  return (
+    <div className="space-y-8">
+      <header className="text-center pt-8 pb-6">
+        <div className="flex items-center justify-center gap-3 mb-3">
+          <Mountain className="w-12 h-12 text-emerald-400" />
+          <h1 className="text-5xl font-black bg-gradient-to-r from-emerald-400 via-cyan-400 to-blue-400 bg-clip-text text-transparent">
+            Comp in a Box
+          </h1>
+        </div>
+        <p className="text-slate-400 text-lg">Create • Compete • Conquer</p>
+      </header>
+
+      <div className="grid md:grid-cols-2 gap-4">
+        <button
+          onClick={onNewComp}
+          className="group relative overflow-hidden bg-gradient-to-br from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white p-8 rounded-2xl font-semibold shadow-2xl transition-all duration-300 hover:scale-105 hover:shadow-emerald-500/50"
+        >
+          <div className="absolute inset-0 bg-gradient-to-br from-white/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
+          <div className="relative flex flex-col items-center gap-3">
+            <Plus className="w-8 h-8" />
+            <span className="text-xl">Create New Comp</span>
+            <span className="text-sm text-emerald-100 opacity-90">Design your own boulders</span>
+          </div>
+        </button>
+
+        <button
+          onClick={() => setShowImport(!showImport)}
+          className="group relative overflow-hidden bg-gradient-to-br from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 text-white p-8 rounded-2xl font-semibold shadow-2xl transition-all duration-300 hover:scale-105 hover:shadow-cyan-500/50"
+        >
+          <div className="absolute inset-0 bg-gradient-to-br from-white/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity"></div>
+          <div className="relative flex flex-col items-center gap-3">
+            <Copy className="w-8 h-8" />
+            <span className="text-xl">Join with Code</span>
+            <span className="text-sm text-cyan-100 opacity-90">Compete on shared boulders</span>
+          </div>
+        </button>
+      </div>
+
+      {showImport && (
+        <div className="bg-slate-900/90 backdrop-blur-xl rounded-2xl p-6 space-y-4 border border-slate-700/50 shadow-2xl">
+          <div className="flex items-center gap-3">
+            <div className="p-3 bg-cyan-500/20 rounded-xl">
+              <Copy className="w-6 h-6 text-cyan-400" />
+            </div>
+            <div>
+              <h3 className="font-bold text-xl text-white">Join a Comp</h3>
+              <p className="text-sm text-slate-400">Enter the share code to get started</p>
+            </div>
+          </div>
+          <textarea
+            className="w-full bg-slate-800/50 border border-slate-700 rounded-xl p-4 text-sm min-h-[100px] focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 focus:outline-none font-mono text-slate-200 placeholder-slate-500"
+            placeholder="Paste share code here..."
+            value={shareCode}
+            onChange={(e) => {
+              setImportError("");
+              setShareCode(e.target.value);
+            }}
+          />
+          {importError && <p className="text-sm text-red-400 flex items-center gap-2">⚠️ {importError}</p>}
+          <div className="flex gap-3">
+            <button
+              onClick={() => {
+                setShowImport(false);
+                setShareCode("");
+                setImportError("");
+              }}
+              className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 py-3 rounded-xl font-semibold transition-all"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleImport}
+              disabled={!shareCode.trim()}
+              className="flex-1 bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white py-3 rounded-xl font-semibold transition-all shadow-lg"
+            >
+              Join Comp
+            </button>
+          </div>
+        </div>
+      )}
+
+      {comps.length > 0 && (
+        <div className="bg-slate-900/60 backdrop-blur-xl rounded-2xl p-6 space-y-4 border border-slate-700/50 shadow-xl">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="p-2 bg-emerald-500/20 rounded-lg">
+              <Users className="w-6 h-6 text-emerald-400" />
+            </div>
+            <h2 className="text-2xl font-bold text-white">My Comps</h2>
+          </div>
+          <div className="grid gap-3">
+            {comps.map((comp) => (
+              <div key={comp.id} className="flex items-center justify-between bg-slate-800/60 backdrop-blur rounded-xl p-4 border border-slate-700/50 hover:border-emerald-500/50 transition-all group">
+                <div className="flex-1 min-w-0">
+                  <div className="font-semibold text-lg text-white truncate">{comp.name}</div>
+                  <div className="text-sm text-slate-400">
+                    {comp.sessions?.length || 0} run{comp.sessions?.length !== 1 ? 's' : ''} • 4 boulders
+                  </div>
+                </div>
+                <div className="flex gap-2 ml-4">
+                  <button
+                    onClick={() => onRunComp(comp)}
+                    className="px-6 py-3 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white rounded-xl font-semibold transition-all shadow-lg hover:shadow-emerald-500/50"
+                  >
+                    Run
+                  </button>
+                  <button
+                    onClick={() => onDeleteComp(comp.id)}
+                    className="p-3 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-xl transition-all"
+                  >
+                    <Trash2 className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {allSessions.length > 0 && (
+        <div className="bg-slate-900/60 backdrop-blur-xl rounded-2xl p-6 space-y-4 border border-slate-700/50 shadow-xl">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="p-2 bg-yellow-500/20 rounded-lg">
+              <Trophy className="w-6 h-6 text-yellow-400" />
+            </div>
+            <h2 className="text-2xl font-bold text-white">Leaderboard</h2>
+          </div>
+          <div className="space-y-2">
+            {allSessions.map((session, i) => (
+              <div key={session.id} className="flex items-center justify-between bg-slate-800/60 backdrop-blur rounded-xl p-4 border border-slate-700/50 hover:border-yellow-500/30 transition-all">
+                <div className="flex items-center gap-4">
+                  <div className="flex items-center justify-center w-10 h-10 rounded-full bg-slate-700/50 text-slate-400 font-bold">
+                    {i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `#${i + 1}`}
+                  </div>
+                  <div>
+                    <div className="font-semibold text-white">{session.playerName}</div>
+                    <div className="text-xs text-slate-400 truncate max-w-[200px]">{session.compName}</div>
+                  </div>
+                </div>
+                <div className="text-2xl font-bold text-emerald-400">{computeTotal(session.boulders)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {comps.length === 0 && (
+        <div className="text-center py-20">
+          <div className="inline-block p-6 bg-slate-800/50 rounded-full mb-6">
+            <Mountain className="w-16 h-16 text-slate-600" />
+          </div>
+          <p className="text-slate-400 text-lg">No comps yet. Create your first one!</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CreateCompScreen({ onBack, onCreate }) {
+  const [name, setName] = useState("");
+  const [boulders, setBoulders] = useState([
+    { id: 1, name: "Boulder 1", imageUrl: "", holds: {} },
+    { id: 2, name: "Boulder 2", imageUrl: "", holds: {} },
+    { id: 3, name: "Boulder 3", imageUrl: "", holds: {} },
+    { id: 4, name: "Boulder 4", imageUrl: "", holds: {} },
+  ]);
+  const [currentBoulder, setCurrentBoulder] = useState(0);
+
+  const boulder = boulders[currentBoulder];
+  const nextHold = HOLD_ORDER.find((h) => !boulder.holds[h]);
+  
+  const isValid = name.trim() && boulders.every((b) => 
+    b.imageUrl && b.holds.start && b.holds.top
+  );
+
+  const handleImageUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      setBoulders((prev) => {
+        const updated = [...prev];
+        updated[currentBoulder] = { ...updated[currentBoulder], imageUrl: String(ev.target.result) };
+        return updated;
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleImageClick = (e) => {
+    if (!nextHold) return;
+    
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+    
+    setBoulders((prev) => {
+      const updated = [...prev];
+      updated[currentBoulder] = {
+        ...updated[currentBoulder],
+        holds: { ...updated[currentBoulder].holds, [nextHold]: { x, y } },
+      };
+      return updated;
     });
   };
 
-  const create = () => {
-    if (!playerName || !allReady) return;
-    onTemplateCreated({
-      id: `t-${Date.now()}`,
-      name: `${gymName || "My Comp"} – ${new Date().toLocaleDateString()} – Set by ${playerName}`,
-      gymName,
-      createdBy: playerName,
+  const resetHolds = () => {
+    setBoulders((prev) => {
+      const updated = [...prev];
+      updated[currentBoulder] = { ...updated[currentBoulder], holds: {} };
+      return updated;
+    });
+  };
+
+  const handleCreate = () => {
+    if (!isValid) return;
+    
+    onCreate({
+      id: `comp-${Date.now()}`,
+      name: name.trim(),
       createdAt: new Date().toISOString(),
       boulders,
       sessions: [],
     });
   };
 
+  const holdsSet = Object.keys(boulder.holds).length;
+  const boulderComplete = boulder.imageUrl && boulder.holds.start && boulder.holds.top;
+
   return (
-    <div className="space-y-3">
-      <div className="flex justify-between items-center">
-        <button onClick={onCancel} className="text-xs text-slate-300 underline" type="button">
-          Home
+    <div className="space-y-6 pb-8">
+      <div className="flex items-center justify-between bg-slate-900/60 backdrop-blur-xl rounded-2xl p-4 border border-slate-700/50">
+        <button onClick={onBack} className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors">
+          <ChevronLeft className="w-5 h-5" />
+          <span className="font-semibold">Back</span>
         </button>
-        <h2 className="text-lg font-semibold">Setup New Comp</h2>
-        <button onClick={onCancel} className="text-xs text-slate-400" type="button">
-          Cancel
-        </button>
+        <h2 className="text-2xl font-bold text-white">Create Comp</h2>
+        <div className="w-20"></div>
       </div>
 
-      <input
-        className="w-full p-2 bg-slate-800 rounded-lg"
-        placeholder="Your name"
-        value={playerName}
-        onChange={(e) => setPlayerName(e.target.value)}
-      />
-      <input
-        className="w-full p-2 bg-slate-800 rounded-lg"
-        placeholder="Gym name (optional)"
-        value={gymName}
-        onChange={(e) => setGymName(e.target.value)}
-      />
+      <div className="bg-slate-900/60 backdrop-blur-xl rounded-2xl p-6 border border-slate-700/50 space-y-4">
+        <div>
+          <label className="block text-sm font-semibold mb-2 text-slate-300">Comp Name</label>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g., Friday Night Comp"
+            className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 focus:outline-none text-white placeholder-slate-500"
+          />
+        </div>
+      </div>
 
-      <p className="text-xs text-slate-300">Add 4 boulder photos and click holds in order: S - 5 - 10 - 15 - 20 - 25.</p>
-
-      {boulders.map((b, i) => (
-        <div key={b.id} className="border border-slate-700 rounded-lg p-2 space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <input
-              className="flex-1 bg-slate-800 rounded-lg p-2 text-sm"
-              value={b.name}
-              onChange={(e) => {
-                const v = e.target.value;
-                setBoulders((p) => {
-                  const c = [...p];
-                  c[i] = { ...c[i], name: v };
-                  return c;
-                });
-              }}
-              placeholder={`Boulder ${i + 1} name (optional)`}
-            />
-            <span
-              className={
-                "text-[10px] px-2 py-1 rounded-md " +
-                (ready(b) ? "bg-emerald-500 text-slate-900" : "bg-slate-800 text-slate-300")
-              }
-            >
-              {ready(b) ? "Ready" : "Not ready"}
-            </span>
+      <div className="bg-slate-900/60 backdrop-blur-xl rounded-2xl p-6 border border-slate-700/50 space-y-6">
+        <div className="flex items-center justify-between">
+          <h3 className="font-bold text-xl text-white">Boulder {currentBoulder + 1} of 4</h3>
+          <div className="flex gap-2">
+            {boulders.map((_, i) => (
+              <button
+                key={i}
+                onClick={() => setCurrentBoulder(i)}
+                className={`w-12 h-12 rounded-xl font-bold text-sm transition-all ${
+                  i === currentBoulder
+                    ? "bg-gradient-to-br from-emerald-500 to-emerald-600 text-white shadow-lg"
+                    : boulders[i].imageUrl && boulders[i].holds.start && boulders[i].holds.top
+                    ? "bg-emerald-500/30 text-emerald-300 border-2 border-emerald-500/50"
+                    : "bg-slate-800 text-slate-500 border-2 border-slate-700"
+                }`}
+              >
+                {i + 1}
+              </button>
+            ))}
           </div>
+        </div>
 
-          <input type="file" accept="image/*" onChange={(e) => setImage(i, e)} />
+        <input
+          type="text"
+          value={boulder.name}
+          onChange={(e) => {
+            const value = e.target.value;
+            setBoulders((prev) => {
+              const updated = [...prev];
+              updated[currentBoulder] = { ...updated[currentBoulder], name: value };
+              return updated;
+            });
+          }}
+          placeholder="Boulder name (optional)"
+          className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-sm focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 focus:outline-none text-white placeholder-slate-500"
+        />
 
-          {b.imageUrl ? (
-            <>
-              <BoulderImage imageUrl={b.imageUrl} holds={b.holds} onClick={(e) => setHold(i, e)} clickable />
-              <div className="flex justify-between items-center text-[10px]">
-                <span>Holds set: {Object.values(b.holds).filter(Boolean).length} / 6</span>
-                <button className="text-slate-300 underline" onClick={() => resetHolds(i)} type="button">
-                  Reset holds
+        <div>
+          <label className="block text-sm font-semibold mb-3 text-slate-300">Upload Photo</label>
+          <input
+            type="file"
+            accept="image/*"
+            onChange={handleImageUpload}
+            className="w-full text-sm text-slate-300 file:mr-4 file:py-3 file:px-6 file:rounded-xl file:border-0 file:bg-gradient-to-r file:from-emerald-500 file:to-emerald-600 file:text-white hover:file:from-emerald-600 hover:file:to-emerald-700 file:cursor-pointer file:font-semibold file:shadow-lg"
+          />
+        </div>
+
+        {boulder.imageUrl && (
+          <div className="space-y-4">
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <label className="text-sm font-semibold text-slate-300">
+                  Mark holds ({holdsSet}/6)
+                </label>
+                <button onClick={resetHolds} className="text-xs text-red-400 hover:text-red-300 font-semibold">
+                  Reset
                 </button>
               </div>
-            </>
-          ) : null}
-        </div>
-      ))}
+              
+              {nextHold && (
+                <div className="bg-gradient-to-r from-emerald-500/20 to-cyan-500/20 border border-emerald-500/50 rounded-xl p-4 mb-4">
+                  <div className="text-sm font-semibold text-emerald-300">
+                    👆 Click to mark: <span className="text-lg text-white">{HOLD_LABELS[nextHold]}</span>
+                    <span className="text-slate-400 ml-2">
+                      {nextHold === 'start' && '(Starting hold)'}
+                      {nextHold === 'top' && '(Top/finish hold)'}
+                      {!['start', 'top'].includes(nextHold) && `(${HOLD_SCORES[nextHold]} points)`}
+                    </span>
+                  </div>
+                </div>
+              )}
+              
+              <div
+                className="relative w-full bg-slate-950 rounded-xl overflow-hidden cursor-crosshair border-2 border-emerald-500/50 hover:border-emerald-500 transition-all shadow-2xl"
+                onClick={handleImageClick}
+                style={{ minHeight: '400px', maxHeight: '600px' }}
+              >
+                <img 
+                  src={boulder.imageUrl} 
+                  alt="Boulder" 
+                  className="w-full h-full object-contain pointer-events-none select-none" 
+                  style={{ minHeight: '400px', maxHeight: '600px' }}
+                />
+                {Object.entries(boulder.holds).map(([holdKey, pos]) => (
+                  <div
+                    key={holdKey}
+                    className="absolute w-14 h-14 rounded-full bg-emerald-500 border-4 border-white flex items-center justify-center text-lg font-bold text-white shadow-2xl pointer-events-none animate-pulse"
+                    style={{
+                      left: `${pos.x * 100}%`,
+                      top: `${pos.y * 100}%`,
+                      transform: "translate(-50%, -50%)",
+                    }}
+                  >
+                    {HOLD_LABELS[holdKey]}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="text-xs text-slate-400 bg-slate-800/50 rounded-xl p-4 space-y-2 border border-slate-700/50">
+              <div className="font-semibold text-slate-300">📍 How to mark holds:</div>
+              <div>1. Click the starting hold on the image</div>
+              <div>2. Click each scoring hold (5, 10, 15, 20)</div>
+              <div>3. Click the top/finish hold</div>
+              <div className="pt-2 text-slate-500">Minimum required: Start + Top</div>
+            </div>
+          </div>
+        )}
+
+        {boulderComplete && (
+          <div className="flex items-center gap-3 text-sm text-emerald-400 bg-emerald-500/10 rounded-xl p-4 border border-emerald-500/30">
+            <Check className="w-5 h-5" />
+            <span className="font-semibold">Boulder {currentBoulder + 1} complete!</span>
+          </div>
+        )}
+      </div>
 
       <button
-        disabled={!allReady || !playerName}
-        onClick={create}
-        className="w-full bg-emerald-500 text-slate-900 rounded-lg py-2 font-semibold disabled:opacity-40"
-        type="button"
+        onClick={handleCreate}
+        disabled={!isValid}
+        className="w-full bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white py-4 rounded-2xl font-bold text-lg shadow-2xl transition-all hover:scale-105"
       >
-        Create Template & Start
+        {isValid ? "Create Comp & Continue →" : "Complete all boulders to continue"}
       </button>
     </div>
   );
 }
 
-function SharedCompRunner({ template, onCancel, onDone }) {
-  const [name, setName] = useState("");
+function PreRunScreen({ comp, onBack, onStartRun }) {
+  const [players, setPlayers] = useState([""]);
+  const [showShareCode, setShowShareCode] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const shareCode = useMemo(() => {
+    return toShareCode({ comp: { ...comp, sessions: [] } });
+  }, [comp]);
+
   const leaderboard = useMemo(() => {
-    const list = (template.sessions || []).slice();
-    list.sort((a, b) => (b.totalScore || 0) - (a.totalScore || 0));
-    return list;
-  }, [template.sessions]);
+    return (comp.sessions || [])
+      .slice()
+      .sort((a, b) => parseFloat(computeTotal(b.boulders)) - parseFloat(computeTotal(a.boulders)))
+      .slice(0, 5);
+  }, [comp.sessions]);
 
-  return (
-    <div className="space-y-3">
-      <div className="flex justify-between items-center">
-        <h2 className="text-lg font-semibold">Run Shared Comp</h2>
-        <button onClick={onCancel} className="text-xs text-slate-400" type="button">
-          Cancel
-        </button>
-      </div>
-
-      <div className="bg-slate-800 rounded-lg p-3">
-        <div className="text-xs text-slate-300">Template</div>
-        <div className="text-sm font-semibold">{template.name}</div>
-      </div>
-
-      <div className="bg-slate-800 rounded-lg p-3">
-        <div className="text-sm font-semibold mb-2">Leaderboard</div>
-        {leaderboard.length === 0 ? (
-          <div className="text-xs text-slate-400">No runs yet. Set the bar.</div>
-        ) : (
-          <ol className="space-y-1 text-xs">
-            {leaderboard.map((s, i) => (
-              <li key={s.id} className="flex justify-between">
-                <span>
-                  {(i === 0 ? "🥇 " : i === 1 ? "🥈 " : i === 2 ? "🥉 " : "")}
-                  {i + 1}. {s.playerName}
-                </span>
-                <span>{s.totalScore}</span>
-              </li>
-            ))}
-          </ol>
-        )}
-      </div>
-
-      <input
-        className="w-full p-2 bg-slate-800 rounded-lg"
-        placeholder="Your name"
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-      />
-
-      {name.trim() ? (
-        <CompRunner
-          template={template}
-          playerName={name.trim()}
-          mode="shared"
-          onHome={onCancel}
-          onDone={(session) => onDone(session)}
-        />
-      ) : (
-        <button
-          disabled={!name.trim()}
-          className="w-full bg-emerald-500 text-slate-900 rounded-lg py-2 font-semibold disabled:opacity-40"
-          onClick={() => {}}
-          type="button"
-        >
-          Enter your name to start
-        </button>
-      )}
-    </div>
-  );
-}
-
-function CompRunner({ template, playerName, onDone, mode, onHome }) {
-  const [idx, setIdx] = useState(0);
-  const [phase, setPhase] = useState(PHASES.PRECLIMB);
-  const [timeLeft, setTimeLeft] = useState(10);
-
-  const [scores, setScores] = useState([0, 0, 0, 0]);
-  const [attempts, setAttempts] = useState([0, 0, 0, 0]);
-
-  const [shareCode, setShareCode] = useState("");
-  const [doneSession, setDoneSession] = useState(null);
-
-  const [showConfirmHome, setShowConfirmHome] = useState(false);
-  const [showResume, setShowResume] = useState(false);
-
-  const resumeCheckedRef = useRef(false);
-
-  const currentBoulder = template.boulders[idx];
-
-  const draftKey = useMemo(() => {
-    const pn = (playerName || "Unknown").trim() || "Unknown";
-    return `compDraft:${template.id}:${pn}`;
-  }, [template.id, playerName]);
-
-  const tickEnabled = phase !== PHASES.SCORE && phase !== PHASES.DONE;
-
-  const hasAnyProgress = useMemo(() => {
-    if (phase === PHASES.DONE) return false;
-    if (idx > 0) return true;
-    if (phase !== PHASES.PRECLIMB) return true;
-    if (scores.some((s) => (s || 0) !== 0)) return true;
-    if (attempts.some((a) => (a || 0) !== 0)) return true;
-    return false;
-  }, [idx, phase, scores, attempts]);
-
-  const saveDraft = () => {
-    if (mode !== "new") return;
-    if (!hasAnyProgress) return;
+  const handleCopy = async () => {
     try {
-      const payload = {
-        v: 1,
-        templateId: template.id,
-        playerName: (playerName || "Unknown").trim() || "Unknown",
-        updatedAt: new Date().toISOString(),
-        state: { idx, phase, timeLeft, scores, attempts },
-      };
-      localStorage.setItem(draftKey, JSON.stringify(payload));
+      await navigator.clipboard.writeText(shareCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
     } catch {}
   };
-
-  const clearDraft = () => {
-    try {
-      localStorage.removeItem(draftKey);
-    } catch {}
-  };
-
-  // Load draft prompt (new comps only)
-  useEffect(() => {
-    if (mode !== "new") return;
-    if (resumeCheckedRef.current) return;
-    resumeCheckedRef.current = true;
-
-    try {
-      const raw = localStorage.getItem(draftKey);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (!parsed || !parsed.state) return;
-      setShowResume(true);
-    } catch {}
-  }, [draftKey, mode]);
-
-  // Auto-save draft (new comps only)
-  useEffect(() => {
-    if (mode !== "new") return;
-    if (!hasAnyProgress) return;
-    if (phase === PHASES.DONE) return;
-    saveDraft();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, hasAnyProgress, idx, phase, timeLeft, scores, attempts]);
-
-  // ticking timer + auto-advance
-  useEffect(() => {
-    if (!tickEnabled) return;
-    if (timeLeft <= 0) {
-      advance();
-      return;
-    }
-    const t = setInterval(() => setTimeLeft((v) => v - 1), 1000);
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tickEnabled, timeLeft, phase, idx]);
-
-  // voice cues
-  useEffect(() => {
-    if (phase === PHASES.PRECLIMB) {
-      if (timeLeft <= 5 && timeLeft > 0) speak(String(timeLeft));
-      if (timeLeft === 0) speak(`${playerName || "Climber"}, you may begin climbing.`);
-    }
-    if (phase === PHASES.CLIMB) {
-      if (timeLeft === 60) speak("One minute warning.");
-      if (timeLeft <= 10 && timeLeft > 0) speak(String(timeLeft));
-      if (timeLeft === 0) speak("Time. Stop climbing.");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, timeLeft]);
-
-  const startPhase = (nextPhase) => {
-    setPhase(nextPhase);
-    if (nextPhase === PHASES.PRECLIMB) setTimeLeft(10);
-    if (nextPhase === PHASES.CLIMB) setTimeLeft(4 * 60);
-    if (nextPhase === PHASES.REST) setTimeLeft(4 * 60);
-    if (nextPhase === PHASES.SCORE) setTimeLeft(0);
-  };
-
-  const advance = () => {
-    if (phase === PHASES.PRECLIMB) {
-      startPhase(PHASES.CLIMB);
-      return;
-    }
-
-    if (phase === PHASES.CLIMB) {
-      startPhase(PHASES.SCORE);
-      return;
-    }
-
-    if (phase === PHASES.REST) {
-      const nextIdx = Math.min(3, idx + 1);
-      setIdx(nextIdx);
-      startPhase(PHASES.PRECLIMB);
-      return;
-    }
-
-    if (phase === PHASES.SCORE) {
-      if (idx === 3) {
-        finish();
-      } else {
-        startPhase(PHASES.REST);
-      }
-    }
-  };
-
-  const finish = () => {
-    const totalScore = computeTotal(scores, attempts);
-    const session = {
-      id: `s-${Date.now()}`,
-      templateId: template.id,
-      templateName: template.name,
-      playerName: playerName || "Unknown",
-      date: new Date().toISOString(),
-      scores,
-      attempts,
-      totalScore,
-    };
-
-    // finished -> clear draft
-    clearDraft();
-
-    if (mode === "new") {
-      const payload = {
-        v: 1,
-        template: {
-          name: template.name,
-          gymName: template.gymName || "",
-          createdBy: template.createdBy || "",
-          createdAt: template.createdAt || "",
-          boulders: template.boulders,
-          sessions: [],
-        },
-      };
-      setShareCode(toShareCode(payload));
-    } else {
-      setShareCode("");
-    }
-
-    setDoneSession(session);
-    setPhase(PHASES.DONE);
-  };
-
-  const totalSoFar = useMemo(() => computeTotal(scores, attempts), [scores, attempts]);
-
-  const handleHomeClick = () => {
-    // Only confirm during active climb (per request)
-    if (phase === PHASES.CLIMB) {
-      setShowConfirmHome(true);
-      return;
-    }
-    // otherwise just leave (but save if progress)
-    saveDraft();
-    if (onHome) onHome();
-  };
-
-  return (
-    <div className="space-y-3">
-      {/* Resume modal */}
-      {showResume && mode === "new" ? (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
-          <div className="w-full max-w-md bg-slate-800 rounded-2xl p-4 space-y-3">
-            <div className="text-sm font-semibold">Resume your last run?</div>
-            <div className="text-xs text-slate-300">We found saved progress for this comp.</div>
-            <div className="flex gap-2">
-              <button
-                className="flex-1 py-2 rounded-lg bg-slate-900 text-slate-200 text-xs font-semibold"
-                onClick={() => {
-                  clearDraft();
-                  setShowResume(false);
-                }}
-                type="button"
-              >
-                Start fresh
-              </button>
-              <button
-                className="flex-1 py-2 rounded-lg bg-emerald-500 text-slate-900 text-xs font-semibold"
-                onClick={() => {
-                  try {
-                    const raw = localStorage.getItem(draftKey);
-                    const parsed = raw ? JSON.parse(raw) : null;
-                    const st = parsed && parsed.state;
-                    if (st) {
-                      setIdx(clampInt(st.idx, 0, 3));
-                      setPhase(st.phase || PHASES.PRECLIMB);
-                      setTimeLeft(clampInt(st.timeLeft, 0, 24 * 60));
-                      setScores(Array.isArray(st.scores) ? st.scores.slice(0, 4) : [0, 0, 0, 0]);
-                      setAttempts(Array.isArray(st.attempts) ? st.attempts.slice(0, 4) : [0, 0, 0, 0]);
-                    }
-                  } catch {}
-                  setShowResume(false);
-                }}
-                type="button"
-              >
-                Resume
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {/* Confirm home modal (active climb only) */}
-      {showConfirmHome ? (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
-          <div className="w-full max-w-md bg-slate-800 rounded-2xl p-4 space-y-3">
-            <div className="text-sm font-semibold">Are you sure?</div>
-            <div className="text-xs text-slate-300">If you leave now, we’ll auto-save so you can resume later.</div>
-            <div className="flex gap-2">
-              <button
-                className="flex-1 py-2 rounded-lg bg-slate-900 text-slate-200 text-xs font-semibold"
-                onClick={() => setShowConfirmHome(false)}
-                type="button"
-              >
-                Stay
-              </button>
-              <button
-                className="flex-1 py-2 rounded-lg bg-emerald-500 text-slate-900 text-xs font-semibold"
-                onClick={() => {
-                  saveDraft();
-                  setShowConfirmHome(false);
-                  if (onHome) onHome();
-                }}
-                type="button"
-              >
-                Leave
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      <div className="bg-slate-800 rounded-lg p-3 space-y-2">
-        <div className="flex items-center justify-between">
-          <button onClick={handleHomeClick} className="text-xs text-slate-300 underline" type="button">
-            Home
-          </button>
-          <span className="text-xs text-slate-400">{playerName}</span>
-        </div>
-
-        <div className="flex justify-between text-xs">
-          <span>
-            Boulder {idx + 1} of 4
-            {mode === "shared" ? " (shared)" : ""}
-          </span>
-          <span>Total: {totalSoFar}</span>
-        </div>
-
-        <div className="flex justify-between items-center">
-          <span className="text-xs">Phase: {phaseLabel(phase)}</span>
-          <span className="text-xl font-bold tabular-nums">
-            {phase === PHASES.SCORE || phase === PHASES.DONE ? "--:--" : formatTime(timeLeft)}
-          </span>
-        </div>
-
-        {currentBoulder && currentBoulder.imageUrl ? (
-          <BoulderImage imageUrl={currentBoulder.imageUrl} holds={currentBoulder.holds} clickable={false} />
-        ) : (
-          <div className="text-xs text-slate-400">No image for this boulder.</div>
-        )}
-
-        {phase === PHASES.CLIMB && (
-          <button
-            className="w-full py-2 rounded-lg bg-emerald-500 text-slate-900 text-xs font-semibold"
-            onClick={() => startPhase(PHASES.SCORE)}
-            type="button"
-          >
-            Finished Early - Go to Scoring
-          </button>
-        )}
-
-        {phase === PHASES.REST && (
-          <button
-            className="w-full py-2 rounded-lg bg-indigo-500 text-slate-900 text-xs font-semibold"
-            onClick={() => {
-              if (idx === 3) return;
-              setIdx((v) => Math.min(3, v + 1));
-              startPhase(PHASES.PRECLIMB);
-            }}
-            type="button"
-          >
-            Skip Rest - Next Boulder
-          </button>
-        )}
-
-        {phase === PHASES.SCORE && (
-          <div className="space-y-3">
-            <div>
-              <div className="text-xs">Highest hold reached:</div>
-              <div className="grid grid-cols-3 gap-2 mt-2">
-                {SCORE_CHOICES.map((v) => (
-                  <button
-                    key={v}
-                    className={
-                      "py-2 rounded-lg text-sm font-semibold " +
-                      (scores[idx] === v ? "bg-emerald-500 text-slate-900" : "bg-slate-700")
-                    }
-                    onClick={() =>
-                      setScores((s) => {
-                        const c = [...s];
-                        c[idx] = v;
-                        return c;
-                      })
-                    }
-                    type="button"
-                  >
-                    {v}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <div className="text-xs">Attempts (0-{MAX_ATTEMPTS}):</div>
-              <div className="grid grid-cols-6 gap-2 mt-2">
-                {[0, 1, 2, 3, 4, 5].map((n) => (
-                  <button
-                    key={n}
-                    className={
-                      "py-2 rounded-lg text-xs font-semibold " +
-                      (attempts[idx] === n ? "bg-emerald-500 text-slate-900" : "bg-slate-700")
-                    }
-                    onClick={() =>
-                      setAttempts((a) => {
-                        const c = [...a];
-                        c[idx] = n;
-                        return c;
-                      })
-                    }
-                    type="button"
-                  >
-                    {n}
-                  </button>
-                ))}
-              </div>
-              <div className="grid grid-cols-5 gap-2 mt-2">
-                {[6, 7, 8, 9, 10].map((n) => (
-                  <button
-                    key={n}
-                    className={
-                      "py-2 rounded-lg text-xs font-semibold " +
-                      (attempts[idx] === n ? "bg-emerald-500 text-slate-900" : "bg-slate-700")
-                    }
-                    onClick={() =>
-                      setAttempts((a) => {
-                        const c = [...a];
-                        c[idx] = n;
-                        return c;
-                      })
-                    }
-                    type="button"
-                  >
-                    {n}
-                  </button>
-                ))}
-              </div>
-              <div className="text-[10px] text-slate-400 mt-1">
-                Penalty: {ATTEMPT_PENALTY_PER_ATTEMPT} per attempt. Effective: {computeBoulderEffective(scores[idx], attempts[idx])}
-              </div>
-            </div>
-
-            <button
-              className="w-full py-2 rounded-lg bg-emerald-500 text-slate-900 text-xs font-semibold"
-              onClick={() => advance()}
-              type="button"
-            >
-              Done Scoring
-            </button>
-          </div>
-        )}
-
-        {phase === PHASES.DONE && doneSession && (
-          <div className="space-y-3">
-            <div>
-              <div className="text-sm font-semibold">Finished</div>
-              <div className="text-xs text-slate-300">Score: {doneSession.totalScore}</div>
-            </div>
-
-            {mode === "new" && shareCode ? (
-              <div className="bg-slate-900 rounded-lg p-2">
-                <div className="text-xs text-slate-300 mb-1">Share code</div>
-                <textarea className="w-full bg-slate-800 rounded-lg p-2 text-[10px] min-h-[90px]" value={shareCode} readOnly />
-                <button
-                  className="w-full mt-2 py-2 rounded-lg bg-indigo-500 text-slate-900 text-xs font-semibold"
-                  onClick={async () => {
-                    try {
-                      await navigator.clipboard.writeText(shareCode);
-                      speak("Copied.");
-                    } catch {
-                      speak("Could not copy.");
-                    }
-                  }}
-                  type="button"
-                >
-                  Copy Share Code
-                </button>
-              </div>
-            ) : null}
-
-            <button
-              className="w-full py-2 rounded-lg bg-emerald-500 text-slate-900 text-xs font-semibold"
-              onClick={() => {
-                if (onDone) onDone(doneSession);
-              }}
-              type="button"
-            >
-              Save & Exit
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// Live mode: multiplayer round-robin (each boulder, each player)
-function createEmptyLiveBoulder(name) {
-  return {
-    name,
-    imageUrl: "",
-    holds: { start: null, five: null, ten: null, fifteen: null, twenty: null, twentyFive: null },
-  };
-}
-
-function isBoulderConfigured(b) {
-  return !!(
-    b &&
-    b.holds &&
-    b.holds.start &&
-    b.holds.twentyFive &&
-    (b.holds.five || b.holds.ten || b.holds.fifteen || b.holds.twenty)
-  );
-}
-
-function LiveCompSetup({ onCancel, onStart }) {
-  const [playerNames, setPlayerNames] = useState([""]);
-  const [mode, setMode] = useState("shared"); // shared | custom
-
-  const [sharedBoulders, setSharedBoulders] = useState([
-    createEmptyLiveBoulder("Boulder 1"),
-    createEmptyLiveBoulder("Boulder 2"),
-    createEmptyLiveBoulder("Boulder 3"),
-    createEmptyLiveBoulder("Boulder 4"),
-  ]);
-
-  // customBoulders[playerIndex][boulderIndex]
-  const [customBoulders, setCustomBoulders] = useState([]);
-
-  useEffect(() => {
-    if (mode !== "custom") return;
-    setCustomBoulders((prev) => {
-      const next = playerNames.map((_, pIdx) =>
-        prev[pIdx] || [0, 1, 2, 3].map((i) => createEmptyLiveBoulder(`Boulder ${i + 1}`))
-      );
-      return next;
-    });
-  }, [mode, playerNames.length]);
-
-  const trimmedPlayers = useMemo(() => playerNames.map((n) => n.trim()).filter(Boolean), [playerNames]);
-
-  const canStart = useMemo(() => {
-    if (trimmedPlayers.length === 0) return false;
-    return true;
-  }, [trimmedPlayers.length]);
 
   const addPlayer = () => {
-    setPlayerNames((p) => (p.length >= 8 ? p : [...p, ""]));
+    if (players.length < 8) {
+      setPlayers([...players, ""]);
+    }
   };
 
   const removePlayer = (idx) => {
-    setPlayerNames((p) => (p.length <= 1 ? p : p.filter((_, i) => i !== idx)));
-    setCustomBoulders((prev) => prev.filter((_, i) => i !== idx));
+    if (players.length > 1) {
+      setPlayers(players.filter((_, i) => i !== idx));
+    }
   };
 
-  const setSharedHold = (bIdx, e) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    const x = (e.clientX - r.left) / r.width;
-    const y = (e.clientY - r.top) / r.height;
-
-    setSharedBoulders((prev) => {
-      const c = [...prev];
-      const b = c[bIdx];
-      const holds = { ...b.holds };
-      const k = HOLD_ORDER.find((key) => !holds[key]);
-      if (!k) return prev;
-      holds[k] = { x, y };
-      c[bIdx] = { ...b, holds };
-      return c;
-    });
+  const updatePlayer = (idx, value) => {
+    const updated = [...players];
+    updated[idx] = value;
+    setPlayers(updated);
   };
 
-  const setSharedImage = (bIdx, e) => {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    const r = new FileReader();
-    r.onload = (ev) =>
-      setSharedBoulders((prev) => {
-        const c = [...prev];
-        c[bIdx] = { ...c[bIdx], imageUrl: String(ev.target.result) };
-        return c;
-      });
-    r.readAsDataURL(f);
-  };
-
-  const resetSharedHolds = (bIdx) => {
-    setSharedBoulders((prev) => {
-      const c = [...prev];
-      c[bIdx] = {
-        ...c[bIdx],
-        holds: { start: null, five: null, ten: null, fifteen: null, twenty: null, twentyFive: null },
-      };
-      return c;
-    });
-  };
-
-  const setCustomHold = (pIdx, bIdx, e) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    const x = (e.clientX - r.left) / r.width;
-    const y = (e.clientY - r.top) / r.height;
-
-    setCustomBoulders((prev) => {
-      const next = [...prev];
-      const row = next[pIdx] || [0, 1, 2, 3].map((i) => createEmptyLiveBoulder(`Boulder ${i + 1}`));
-      const b = row[bIdx];
-      const holds = { ...b.holds };
-      const k = HOLD_ORDER.find((key) => !holds[key]);
-      if (!k) return prev;
-      holds[k] = { x, y };
-      const newRow = [...row];
-      newRow[bIdx] = { ...b, holds };
-      next[pIdx] = newRow;
-      return next;
-    });
-  };
-
-  const setCustomImage = (pIdx, bIdx, e) => {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    const r = new FileReader();
-    r.onload = (ev) =>
-      setCustomBoulders((prev) => {
-        const next = [...prev];
-        const row = next[pIdx] || [0, 1, 2, 3].map((i) => createEmptyLiveBoulder(`Boulder ${i + 1}`));
-        const newRow = [...row];
-        newRow[bIdx] = { ...newRow[bIdx], imageUrl: String(ev.target.result) };
-        next[pIdx] = newRow;
-        return next;
-      });
-    r.readAsDataURL(f);
-  };
-
-  const resetCustomHolds = (pIdx, bIdx) => {
-    setCustomBoulders((prev) => {
-      const next = [...prev];
-      const row = next[pIdx] || [0, 1, 2, 3].map((i) => createEmptyLiveBoulder(`Boulder ${i + 1}`));
-      const newRow = [...row];
-      newRow[bIdx] = {
-        ...newRow[bIdx],
-        holds: { start: null, five: null, ten: null, fifteen: null, twenty: null, twentyFive: null },
-      };
-      next[pIdx] = newRow;
-      return next;
-    });
-  };
-
-  const start = () => {
-    if (!canStart) return;
-
-    const players = trimmedPlayers.map((name, pIdx) => {
-      if (mode === "shared") {
-        return {
-          name,
-          boulders: sharedBoulders.map((b, i) => ({
-            ...b,
-            name: (b.name || `Boulder ${i + 1}`).trim() || `Boulder ${i + 1}`,
-          })),
-        };
-      }
-
-      const row = (customBoulders[pIdx] || [0, 1, 2, 3].map((i) => createEmptyLiveBoulder(`Boulder ${i + 1}`))).map(
-        (b, i) => ({
-          ...b,
-          name: (b.name || `Boulder ${i + 1}`).trim() || `Boulder ${i + 1}`,
-        })
-      );
-
-      return { name, boulders: row };
-    });
-
-    onStart({ players, mode, createdAt: new Date().toISOString() });
-  };
+  const validPlayers = players.filter(p => p.trim()).map(p => p.trim());
+  const canStart = validPlayers.length > 0;
 
   return (
-    <div className="space-y-4">
-      <div className="flex justify-between items-center">
-        <button onClick={onCancel} className="text-xs text-slate-300 underline" type="button">
-          Home
+    <div className="space-y-6 pb-8">
+      <div className="flex items-center justify-between bg-slate-900/60 backdrop-blur-xl rounded-2xl p-4 border border-slate-700/50">
+        <button onClick={onBack} className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors">
+          <ChevronLeft className="w-5 h-5" />
+          <span className="font-semibold">Back</span>
         </button>
-        <h2 className="text-lg font-semibold">Setup Live Comp</h2>
-        <button onClick={onCancel} className="text-xs text-slate-400" type="button">
-          Cancel
+        <h2 className="text-xl font-bold text-white truncate max-w-[250px]">{comp.name}</h2>
+        <button
+          onClick={() => setShowShareCode(!showShareCode)}
+          className="p-2 bg-slate-800 hover:bg-slate-700 rounded-xl transition-all"
+        >
+          <Copy className="w-5 h-5 text-slate-400" />
         </button>
       </div>
 
-      <div className="space-y-2">
-        <div className="text-sm font-semibold">Players (up to 8)</div>
-        <div className="space-y-2">
-          {playerNames.map((n, idx) => (
-            <div key={idx} className="flex items-center gap-2">
+      {showShareCode && (
+        <div className="bg-slate-900/60 backdrop-blur-xl rounded-2xl p-6 border border-slate-700/50 space-y-4">
+          <h3 className="font-bold text-lg text-white">Share Code</h3>
+          <textarea
+            value={shareCode}
+            readOnly
+            className="w-full bg-slate-800/50 rounded-xl p-4 text-xs min-h-[90px] border border-slate-700 font-mono text-slate-300"
+          />
+          <button
+            onClick={handleCopy}
+            className="w-full bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 shadow-lg"
+          >
+            {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+            {copied ? "Copied!" : "Copy Share Code"}
+          </button>
+        </div>
+      )}
+
+      {leaderboard.length > 0 && (
+        <div className="bg-slate-900/60 backdrop-blur-xl rounded-2xl p-6 border border-slate-700/50 space-y-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-yellow-500/20 rounded-lg">
+              <Trophy className="w-5 h-5 text-yellow-400" />
+            </div>
+            <h3 className="font-bold text-lg text-white">Leaderboard</h3>
+          </div>
+          <div className="space-y-2">
+            {leaderboard.map((session, i) => (
+              <div key={session.id} className="flex items-center justify-between bg-slate-800/60 rounded-xl p-3 border border-slate-700/50">
+                <div className="flex items-center gap-3">
+                  <span className="text-slate-400 font-bold w-8">#{i + 1}</span>
+                  <span className="font-semibold text-white">{session.playerName}</span>
+                </div>
+                <span className="font-bold text-emerald-400 text-lg">{computeTotal(session.boulders)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="bg-slate-900/60 backdrop-blur-xl rounded-2xl p-6 border border-slate-700/50 space-y-4">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-cyan-500/20 rounded-lg">
+            <Users className="w-5 h-5 text-cyan-400" />
+          </div>
+          <h3 className="font-bold text-lg text-white">Add Players</h3>
+        </div>
+        <div className="space-y-3">
+          {players.map((name, idx) => (
+            <div key={idx} className="flex gap-2">
               <input
-                className="flex-1 bg-slate-800 rounded-lg p-2 text-sm"
-                value={n}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setPlayerNames((p) => {
-                    const c = [...p];
-                    c[idx] = v;
-                    return c;
-                  });
-                }}
-                placeholder={`Player ${idx + 1}`}
+                type="text"
+                value={name}
+                onChange={(e) => updatePlayer(idx, e.target.value)}
+                placeholder={`Player ${idx + 1} name`}
+                className="flex-1 bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 focus:outline-none text-white placeholder-slate-500"
               />
-              {playerNames.length > 1 ? (
-                <button className="text-xs text-red-400" onClick={() => removePlayer(idx)} type="button">
-                  Remove
+              {players.length > 1 && (
+                <button
+                  onClick={() => removePlayer(idx)}
+                  className="p-3 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-xl transition-all"
+                >
+                  <Trash2 className="w-5 h-5" />
                 </button>
-              ) : null}
+              )}
             </div>
           ))}
-
-          {playerNames.length < 8 ? (
-            <button className="text-xs text-emerald-400 underline" onClick={addPlayer} type="button">
+          {players.length < 8 && (
+            <button
+              onClick={addPlayer}
+              className="w-full flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 py-3 rounded-xl text-sm font-semibold text-slate-300 transition-all border border-slate-700"
+            >
+              <Plus className="w-4 h-4" />
               Add Player
             </button>
-          ) : null}
+          )}
         </div>
+        <button
+          onClick={() => onStartRun(validPlayers)}
+          disabled={!canStart}
+          className="w-full bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white py-4 rounded-xl font-bold text-lg shadow-2xl transition-all"
+        >
+          Start Climbing {validPlayers.length > 0 && `(${validPlayers.length} player${validPlayers.length !== 1 ? 's' : ''})`}
+        </button>
       </div>
-
-      <div className="space-y-2">
-        <div className="text-sm font-semibold">Boulder Sets</div>
-        <div className="flex gap-2 text-xs">
-          <button
-            className={`flex-1 py-1 rounded-lg ${mode === "shared" ? "bg-emerald-500 text-slate-900" : "bg-slate-800"}`}
-            onClick={() => setMode("shared")}
-            type="button"
-          >
-            Same 4 Boulders
-          </button>
-          <button
-            className={`flex-1 py-1 rounded-lg ${mode === "custom" ? "bg-emerald-500 text-slate-900" : "bg-slate-800"}`}
-            onClick={() => setMode("custom")}
-            type="button"
-          >
-            Custom per Player
-          </button>
-        </div>
-
-        {mode === "shared" ? (
-          <div className="space-y-3 mt-2 text-xs">
-            {[0, 1, 2, 3].map((i) => {
-              const b = sharedBoulders[i];
-              const ready = isBoulderConfigured(b);
-              return (
-                <div key={i} className="border border-slate-700 rounded-lg p-2 space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <input
-                      className="flex-1 bg-slate-800 rounded-lg p-2 text-sm"
-                      value={b.name}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        setSharedBoulders((p) => {
-                          const c = [...p];
-                          c[i] = { ...c[i], name: v };
-                          return c;
-                        });
-                      }}
-                      placeholder={`Boulder ${i + 1} name (optional)`}
-                    />
-                    <span
-                      className={
-                        "text-[10px] px-2 py-1 rounded-md " +
-                        (ready ? "bg-emerald-500 text-slate-900" : "bg-slate-800 text-slate-300")
-                      }
-                    >
-                      {ready ? "Ready" : "Not ready"}
-                    </span>
-                  </div>
-
-                  <input type="file" accept="image/*" onChange={(e) => setSharedImage(i, e)} />
-
-                  {b.imageUrl ? (
-                    <>
-                      <BoulderImage imageUrl={b.imageUrl} holds={b.holds} onClick={(e) => setSharedHold(i, e)} clickable />
-                      <div className="flex justify-between items-center text-[10px]">
-                        <span>Holds set: {Object.values(b.holds).filter(Boolean).length} / 6</span>
-                        <button className="text-slate-300 underline" onClick={() => resetSharedHolds(i)} type="button">
-                          Reset holds
-                        </button>
-                      </div>
-                    </>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="space-y-3 mt-2 text-xs max-h-72 overflow-y-auto pr-1">
-            {playerNames.map((nm, pIdx) => {
-              const row =
-                customBoulders[pIdx] || [0, 1, 2, 3].map((i) => createEmptyLiveBoulder(`Boulder ${i + 1}`));
-
-              return (
-                <div key={pIdx} className="border border-slate-700 rounded-lg p-2 space-y-2">
-                  <div className="text-sm font-semibold">{nm.trim() || `Player ${pIdx + 1}`}</div>
-
-                  {[0, 1, 2, 3].map((bIdx) => {
-                    const b = row[bIdx];
-                    const ready = isBoulderConfigured(b);
-                    return (
-                      <div key={bIdx} className="border border-slate-800 rounded-md p-2 space-y-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <input
-                            className="flex-1 bg-slate-800 rounded-lg p-2 text-sm"
-                            value={b.name}
-                            onChange={(e) => {
-                              const v = e.target.value;
-                              setCustomBoulders((prev) => {
-                                const next = [...prev];
-                                const rr =
-                                  next[pIdx] || [0, 1, 2, 3].map((i) => createEmptyLiveBoulder(`Boulder ${i + 1}`));
-                                const newRow = [...rr];
-                                newRow[bIdx] = { ...newRow[bIdx], name: v };
-                                next[pIdx] = newRow;
-                                return next;
-                              });
-                            }}
-                            placeholder={`Boulder ${bIdx + 1} name (optional)`}
-                          />
-                          <span
-                            className={
-                              "text-[10px] px-2 py-1 rounded-md " +
-                              (ready ? "bg-emerald-500 text-slate-900" : "bg-slate-800 text-slate-300")
-                            }
-                          >
-                            {ready ? "Ready" : "Not ready"}
-                          </span>
-                        </div>
-
-                        <input type="file" accept="image/*" onChange={(e) => setCustomImage(pIdx, bIdx, e)} />
-
-                        {b.imageUrl ? (
-                          <>
-                            <BoulderImage
-                              imageUrl={b.imageUrl}
-                              holds={b.holds}
-                              onClick={(e) => setCustomHold(pIdx, bIdx, e)}
-                              clickable
-                            />
-                            <div className="flex justify-between items-center text-[10px]">
-                              <span>Holds set: {Object.values(b.holds).filter(Boolean).length} / 6</span>
-                              <button
-                                className="text-slate-300 underline"
-                                onClick={() => resetCustomHolds(pIdx, bIdx)}
-                                type="button"
-                              >
-                                Reset holds
-                              </button>
-                            </div>
-                          </>
-                        ) : null}
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      <button
-        disabled={!canStart}
-        onClick={start}
-        className="w-full bg-emerald-500 text-slate-900 rounded-lg py-2 font-semibold disabled:opacity-40"
-        type="button"
-      >
-        Start Live Comp
-      </button>
     </div>
   );
 }
 
-function LiveCompRunner({ config, onHome }) {
-  const players = config.players || [];
-
-  const [playerIdx, setPlayerIdx] = useState(0);
+function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
   const [boulderIdx, setBoulderIdx] = useState(0);
-  const [phase, setPhase] = useState(PHASES.PRECLIMB);
+  const [playerIdx, setPlayerIdx] = useState(0);
+  const [phase, setPhase] = useState(PHASES.READY);
   const [timeLeft, setTimeLeft] = useState(10);
+  const [showExitConfirm, setShowExitConfirm] = useState(false);
+  const [showResults, setShowResults] = useState(false);
+  const [shareCode, setShareCode] = useState("");
+  const [copied, setCopied] = useState(false);
 
-  const [scores, setScores] = useState(() => players.map(() => [0, 0, 0, 0]));
-  const [attempts, setAttempts] = useState(() => players.map(() => [0, 0, 0, 0]));
+  const currentSession = sessions[playerIdx];
+  const boulder = comp.boulders[boulderIdx];
+  const sessionBoulder = currentSession.boulders[boulderIdx];
 
-  const [finished, setFinished] = useState(false);
-  const [results, setResults] = useState([]);
-  const [showConfirmHome, setShowConfirmHome] = useState(false);
-
-  const player = players[playerIdx];
-  const boulder = player && player.boulders ? player.boulders[boulderIdx] : null;
-
-  const tickEnabled = !finished && phase !== PHASES.SCORE && phase !== PHASES.DONE;
+  const tickEnabled = phase === PHASES.CLIMB || phase === PHASES.READY || phase === PHASES.REST;
 
   useEffect(() => {
-    if (!tickEnabled) return;
-    if (timeLeft <= 0) {
-      advance();
-      return;
-    }
-    const t = setInterval(() => setTimeLeft((v) => v - 1), 1000);
-    return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tickEnabled, timeLeft, phase, playerIdx, boulderIdx]);
+    if (!tickEnabled || timeLeft <= 0) return;
+    const timer = setInterval(() => setTimeLeft((t) => {
+      const newTime = Math.max(0, t - 1);
+      if (newTime === 0) {
+        if (phase === PHASES.READY) {
+          setPhase(PHASES.CLIMB);
+          setTimeLeft(4 * 60);
+          speak(`${currentSession.playerName}, you may begin climbing`);
+        } else if (phase === PHASES.REST) {
+          setPhase(PHASES.READY);
+          setTimeLeft(10);
+        }
+      }
+      return newTime;
+    }), 1000);
+    return () => clearInterval(timer);
+  }, [tickEnabled, timeLeft, phase, currentSession.playerName]);
 
   useEffect(() => {
-    if (finished) return;
-    if (phase === PHASES.PRECLIMB) {
+    if (phase === PHASES.READY) {
       if (timeLeft <= 5 && timeLeft > 0) speak(String(timeLeft));
-      if (timeLeft === 0 && player) speak(`${player.name}, you may begin climbing.`);
+    } else if (phase === PHASES.CLIMB) {
+      if (timeLeft === 60) speak("One minute remaining");
+      if (timeLeft === 10) speak("Ten seconds");
+      if (timeLeft === 0) speak("Time is up");
     }
-    if (phase === PHASES.CLIMB) {
-      if (timeLeft === 60) speak("One minute warning.");
-      if (timeLeft <= 10 && timeLeft > 0) speak(String(timeLeft));
-      if (timeLeft === 0) speak("Time. Stop climbing.");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase, timeLeft, finished, playerIdx]);
+  }, [phase, timeLeft]);
 
-  const startPhase = (nextPhase) => {
-    setPhase(nextPhase);
-    if (nextPhase === PHASES.PRECLIMB) setTimeLeft(10);
-    if (nextPhase === PHASES.CLIMB) setTimeLeft(4 * 60);
-    if (nextPhase === PHASES.SCORE) setTimeLeft(0);
-    if (nextPhase === PHASES.DONE) setTimeLeft(0);
+  const finishClimb = () => {
+    setPhase(PHASES.SCORE);
   };
 
-  const advance = () => {
-    if (finished) return;
-
-    if (phase === PHASES.PRECLIMB) {
-      startPhase(PHASES.CLIMB);
-      return;
-    }
-
-    if (phase === PHASES.CLIMB) {
-      startPhase(PHASES.SCORE);
-      return;
-    }
-
-    if (phase === PHASES.SCORE) {
-      const lastPlayer = playerIdx === players.length - 1;
-      const lastBoulder = boulderIdx === 3;
-
-      if (!lastPlayer) {
-        setPlayerIdx((i) => i + 1);
-        startPhase(PHASES.PRECLIMB);
-        return;
-      }
-
-      if (!lastBoulder) {
-        setPlayerIdx(0);
-        setBoulderIdx((i) => i + 1);
-        startPhase(PHASES.PRECLIMB);
-        return;
-      }
-
-      finish();
-    }
-  };
-
-  const finish = () => {
-    const totals = players.map((p, pIdx) => {
-      const t = computeTotal(scores[pIdx] || [0, 0, 0, 0], attempts[pIdx] || [0, 0, 0, 0]);
-      return { name: p.name, total: t };
-    });
-
-    totals.sort((a, b) => b.total - a.total);
-    setResults(totals);
-    setFinished(true);
-    setPhase(PHASES.DONE);
-  };
-
-  const setScoreForCurrent = (v) => {
-    setScores((prev) => {
-      const next = prev.map((row) => [...row]);
-      next[playerIdx][boulderIdx] = v;
-      return next;
+  const setHighestHold = (hold) => {
+    onUpdateSessions((prev) => {
+      const updated = [...prev];
+      updated[playerIdx] = {
+        ...updated[playerIdx],
+        boulders: updated[playerIdx].boulders.map((b, i) => 
+          i === boulderIdx ? { ...b, highestHold: hold } : b
+        )
+      };
+      return updated;
     });
   };
 
-  const setAttemptsForCurrent = (n) => {
-    setAttempts((prev) => {
-      const next = prev.map((row) => [...row]);
-      next[playerIdx][boulderIdx] = clampInt(n, 0, MAX_ATTEMPTS);
-      return next;
+  const setAttempts = (attempts) => {
+    onUpdateSessions((prev) => {
+      const updated = [...prev];
+      updated[playerIdx] = {
+        ...updated[playerIdx],
+        boulders: updated[playerIdx].boulders.map((b, i) => 
+          i === boulderIdx ? { ...b, attempts } : b
+        )
+      };
+      return updated;
     });
   };
 
-  const handleHomeClick = () => {
-    if (phase === PHASES.CLIMB) {
-      setShowConfirmHome(true);
-      return;
+  const nextTurn = () => {
+    if (playerIdx < sessions.length - 1) {
+      setPlayerIdx(playerIdx + 1);
+      setPhase(PHASES.REST);
+      setTimeLeft(2 * 60);
+    } else if (boulderIdx < 3) {
+      setBoulderIdx(boulderIdx + 1);
+      setPlayerIdx(0);
+      setPhase(PHASES.REST);
+      setTimeLeft(2 * 60);
+    } else {
+      const code = toShareCode({ comp: { ...comp, sessions: [] } });
+      setShareCode(code);
+      setShowResults(true);
     }
-    if (onHome) onHome();
   };
 
-  if (!players.length) {
-    return (
-      <div className="space-y-3">
-        <div className="flex justify-between items-center">
-          <h2 className="text-lg font-semibold">Live Comp</h2>
-          <button onClick={onHome} className="text-xs text-slate-300 underline" type="button">
-            Home
-          </button>
-        </div>
-        <div className="bg-slate-800 rounded-lg p-3 text-xs text-slate-300">No players in this live comp.</div>
-      </div>
-    );
-  }
+  const handleCopyShareCode = async () => {
+    try {
+      await navigator.clipboard.writeText(shareCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {}
+  };
 
-  if (finished) {
-    return (
-      <div className="space-y-3">
-        <div className="flex justify-between items-center">
-          <h2 className="text-lg font-semibold">Live Results</h2>
-          <button onClick={onHome} className="text-xs text-slate-300 underline" type="button">
-            Home
-          </button>
-        </div>
+  const handleFinish = () => {
+    const completedSessions = sessions.map(s => ({
+      ...s,
+      completedAt: new Date().toISOString(),
+    }));
+    onComplete(completedSessions);
+  };
 
-        <div className="bg-slate-800 rounded-lg p-3">
-          <ol className="space-y-2 text-sm">
-            {results.map((r, i) => (
-              <li key={r.name} className="flex justify-between">
-                <span>
-                  {(i === 0 ? "🥇 " : i === 1 ? "🥈 " : i === 2 ? "🥉 " : "")}
-                  {i + 1}. {r.name}
-                </span>
-                <span>{r.total}</span>
-              </li>
-            ))}
-          </ol>
-        </div>
+  const skipRest = () => {
+    setPhase(PHASES.READY);
+    setTimeLeft(10);
+  };
 
-        <button className="w-full bg-emerald-500 text-slate-900 rounded-lg py-2 font-semibold" onClick={onHome} type="button">
-          Back to Home
-        </button>
-      </div>
-    );
-  }
+  useEffect(() => {
+    if (phase === PHASES.REST && timeLeft === 0) {
+      setPhase(PHASES.READY);
+      setTimeLeft(10);
+    }
+  }, [phase, timeLeft]);
+
+  const handleExit = () => {
+    if (phase === PHASES.CLIMB) {
+      setShowExitConfirm(true);
+    } else {
+      onExit();
+    }
+  };
 
   return (
-    <div className="space-y-3">
-      {showConfirmHome ? (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
-          <div className="w-full max-w-md bg-slate-800 rounded-2xl p-4 space-y-3">
-            <div className="text-sm font-semibold">Are you sure?</div>
-            <div className="text-xs text-slate-300">This will end the live comp run.</div>
-            <div className="flex gap-2">
-              <button
-                className="flex-1 py-2 rounded-lg bg-slate-900 text-slate-200 text-xs font-semibold"
-                onClick={() => setShowConfirmHome(false)}
-                type="button"
-              >
-                Stay
-              </button>
-              <button
-                className="flex-1 py-2 rounded-lg bg-emerald-500 text-slate-900 text-xs font-semibold"
-                onClick={() => {
-                  setShowConfirmHome(false);
-                  if (onHome) onHome();
-                }}
-                type="button"
-              >
-                Leave
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      <div className="bg-slate-800 rounded-lg p-3 space-y-2">
-        <div className="flex items-center justify-between">
-          <button onClick={handleHomeClick} className="text-xs text-slate-300 underline" type="button">
-            Home
-          </button>
-          <span className="text-xs text-slate-400">Live • {config.mode === "custom" ? "Custom" : "Shared"}</span>
-        </div>
-
-        <div className="flex justify-between text-xs">
-          <span>
-            Boulder {boulderIdx + 1} / 4 • Climber {playerIdx + 1} / {players.length}
-          </span>
-          <span className="text-slate-300">{player.name}</span>
-        </div>
-
-        <div className="flex justify-between items-center">
-          <span className="text-xs">Phase: {phaseLabel(phase)}</span>
-          <span className="text-xl font-bold tabular-nums">
-            {phase === PHASES.SCORE || phase === PHASES.DONE ? "--:--" : formatTime(timeLeft)}
-          </span>
-        </div>
-
-        <div className="text-xs text-slate-300">Problem: {boulder ? boulder.name : `Boulder ${boulderIdx + 1}`}</div>
-
-        {boulder && boulder.imageUrl ? (
-          <BoulderImage imageUrl={boulder.imageUrl} holds={boulder.holds} clickable={false} />
-        ) : (
-          <div className="text-xs text-slate-400">No image for this boulder.</div>
-        )}
-
-        {phase === PHASES.PRECLIMB ? (
-          <button
-            className="w-full py-2 rounded-lg bg-indigo-500 text-slate-900 text-xs font-semibold"
-            onClick={() => startPhase(PHASES.CLIMB)}
-            type="button"
-          >
-            Skip Pre-Climb
-          </button>
-        ) : null}
-
-        {phase === PHASES.CLIMB ? (
-          <button
-            className="w-full py-2 rounded-lg bg-emerald-500 text-slate-900 text-xs font-semibold"
-            onClick={() => startPhase(PHASES.SCORE)}
-            type="button"
-          >
-            Finished Early - Go to Scoring
-          </button>
-        ) : null}
-
-        {phase === PHASES.SCORE ? (
-          <div className="space-y-3">
-            <div>
-              <div className="text-xs">Highest hold reached:</div>
-              <div className="grid grid-cols-3 gap-2 mt-2">
-                {SCORE_CHOICES.map((v) => (
-                  <button
-                    key={v}
-                    className={
-                      "py-2 rounded-lg text-sm font-semibold " +
-                      (scores[playerIdx][boulderIdx] === v ? "bg-emerald-500 text-slate-900" : "bg-slate-700")
-                    }
-                    onClick={() => setScoreForCurrent(v)}
-                    type="button"
-                  >
-                    {v}
-                  </button>
-                ))}
+    <div className="space-y-4 pb-8">
+      {showResults && (
+        <div className="fixed inset-0 bg-black/90 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 rounded-3xl p-8 max-w-md w-full space-y-6 border border-slate-700 shadow-2xl">
+            <div className="text-center">
+              <div className="inline-block p-4 bg-yellow-500/20 rounded-full mb-4">
+                <Trophy className="w-12 h-12 text-yellow-400" />
               </div>
+              <h3 className="text-3xl font-bold mb-2 text-white">Competition Complete!</h3>
             </div>
 
-            <div>
-              <div className="text-xs">Attempts (0-{MAX_ATTEMPTS}):</div>
-              <div className="grid grid-cols-6 gap-2 mt-2">
-                {[0, 1, 2, 3, 4, 5].map((n) => (
-                  <button
-                    key={n}
-                    className={
-                      "py-2 rounded-lg text-xs font-semibold " +
-                      (attempts[playerIdx][boulderIdx] === n ? "bg-emerald-500 text-slate-900" : "bg-slate-700")
-                    }
-                    onClick={() => setAttemptsForCurrent(n)}
-                    type="button"
-                  >
-                    {n}
-                  </button>
+            <div className="bg-slate-800/50 rounded-2xl p-5 space-y-3">
+              <h4 className="font-bold text-sm text-slate-400 mb-4">FINAL STANDINGS</h4>
+              {sessions
+                .map((s, i) => ({ ...s, index: i, total: computeTotal(s.boulders) }))
+                .sort((a, b) => parseFloat(b.total) - parseFloat(a.total))
+                .map((s, rank) => (
+                  <div key={s.index} className="flex justify-between items-center py-3 border-b border-slate-700 last:border-0">
+                    <div className="flex items-center gap-4">
+                      <span className="text-3xl">
+                        {rank === 0 ? "🥇" : rank === 1 ? "🥈" : rank === 2 ? "🥉" : `#${rank + 1}`}
+                      </span>
+                      <span className="font-semibold text-white">{s.playerName}</span>
+                    </div>
+                    <span className="text-2xl font-bold text-emerald-400">{s.total}</span>
+                  </div>
                 ))}
+            </div>
+
+            <div className="bg-slate-800/50 rounded-2xl p-5 space-y-4">
+              <div className="flex items-center gap-2">
+                <Copy className="w-5 h-5 text-cyan-400" />
+                <h4 className="font-bold text-white">Share This Comp</h4>
               </div>
-              <div className="grid grid-cols-5 gap-2 mt-2">
-                {[6, 7, 8, 9, 10].map((n) => (
-                  <button
-                    key={n}
-                    className={
-                      "py-2 rounded-lg text-xs font-semibold " +
-                      (attempts[playerIdx][boulderIdx] === n ? "bg-emerald-500 text-slate-900" : "bg-slate-700")
-                    }
-                    onClick={() => setAttemptsForCurrent(n)}
-                    type="button"
-                  >
-                    {n}
-                  </button>
-                ))}
-              </div>
-              <div className="text-[10px] text-slate-400 mt-1">
-                Effective: {computeBoulderEffective(scores[playerIdx][boulderIdx], attempts[playerIdx][boulderIdx])}
-              </div>
+              <p className="text-xs text-slate-400">
+                Share this code so others can compete on the same boulders!
+              </p>
+              <textarea
+                value={shareCode}
+                readOnly
+                className="w-full bg-slate-900 rounded-xl p-3 text-xs min-h-[80px] border border-slate-700 font-mono text-slate-300"
+              />
+              <button
+                onClick={handleCopyShareCode}
+                className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 text-white py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 shadow-lg"
+              >
+                {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                {copied ? "Copied!" : "Copy Share Code"}
+              </button>
             </div>
 
             <button
-              className="w-full py-2 rounded-lg bg-emerald-500 text-slate-900 text-xs font-semibold"
-              onClick={() => advance()}
-              type="button"
+              onClick={handleFinish}
+              className="w-full bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white py-4 rounded-xl font-bold text-lg transition-all shadow-lg"
             >
-              Done Scoring
+              Save Results & Return Home
             </button>
           </div>
-        ) : null}
+        </div>
+      )}
+
+      {showExitConfirm && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 rounded-3xl p-6 max-w-sm w-full space-y-5 border border-slate-700 shadow-2xl">
+            <h3 className="text-2xl font-bold text-white">Exit Run?</h3>
+            <p className="text-slate-300">Your progress will be lost if you exit now.</p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowExitConfirm(false)}
+                className="flex-1 bg-slate-800 hover:bg-slate-700 py-3 rounded-xl font-semibold text-white"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setShowExitConfirm(false);
+                  onExit();
+                }}
+                className="flex-1 bg-red-500 hover:bg-red-600 py-3 rounded-xl font-semibold text-white"
+              >
+                Exit Run
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center justify-between bg-slate-900/60 backdrop-blur-xl rounded-2xl p-4 border border-slate-700/50">
+        <button onClick={handleExit} className="flex items-center gap-2 text-slate-400 hover:text-white">
+          <Home className="w-5 h-5" />
+          <span className="font-semibold">Exit</span>
+        </button>
+        <div className="text-center">
+          <div className="text-xs text-slate-400">
+            Boulder {boulderIdx + 1}/4 • Player {playerIdx + 1}/{sessions.length}
+          </div>
+          <div className="font-bold text-emerald-400">{currentSession.playerName}</div>
+        </div>
+        <div className="w-16"></div>
+      </div>
+
+      <div className="bg-slate-900/60 backdrop-blur-xl rounded-2xl p-4 border border-slate-700/50">
+        <div className="text-xs text-slate-400 mb-3 font-semibold">CURRENT STANDINGS</div>
+        <div className="space-y-2">
+          {sessions
+            .map((s, i) => ({ ...s, index: i, total: computeTotal(s.boulders) }))
+            .sort((a, b) => parseFloat(b.total) - parseFloat(a.total))
+            .map((s, rank) => (
+              <div 
+                key={s.index} 
+                className={`flex justify-between text-sm py-2 px-3 rounded-lg ${
+                  s.index === playerIdx ? 'bg-emerald-500/20 text-emerald-300 font-bold' : 'text-slate-300'
+                }`}
+              >
+                <span>#{rank + 1} {s.playerName}</span>
+                <span>{s.total}</span>
+              </div>
+            ))}
+        </div>
+      </div>
+
+      <div className="bg-slate-900/60 backdrop-blur-xl rounded-2xl p-6 border border-slate-700/50 space-y-6">
+        {phase === PHASES.READY && (
+          <>
+            <div className="text-center space-y-4">
+              <div className="text-sm text-slate-400 font-semibold">GET READY</div>
+              <h2 className="text-4xl font-black text-white">{currentSession.playerName}</h2>
+              <div className="bg-gradient-to-r from-emerald-500 to-cyan-500 rounded-xl p-5">
+                <div className="text-sm text-white/80 mb-1 font-semibold">Boulder {boulderIdx + 1} of 4</div>
+                <div className="text-3xl font-bold text-white">{boulder.name}</div>
+              </div>
+              <div className="text-8xl font-black tabular-nums text-emerald-400 py-6">{timeLeft}</div>
+              <p className="text-slate-400 text-lg">Prepare to climb...</p>
+            </div>
+
+            {boulder.imageUrl && (
+              <div className="relative w-full bg-slate-950 rounded-xl overflow-hidden border-2 border-slate-700">
+                <img 
+                  src={boulder.imageUrl} 
+                  alt="Boulder" 
+                  className="w-full h-full object-contain" 
+                  style={{ minHeight: '300px', maxHeight: '400px' }}
+                />
+                {Object.entries(boulder.holds).map(([holdKey, pos]) => (
+                  <div
+                    key={holdKey}
+                    className="absolute w-12 h-12 rounded-full bg-emerald-500 border-3 border-white flex items-center justify-center text-base font-bold text-white shadow-lg"
+                    style={{
+                      left: `${pos.x * 100}%`,
+                      top: `${pos.y * 100}%`,
+                      transform: "translate(-50%, -50%)",
+                    }}
+                  >
+                    {HOLD_LABELS[holdKey]}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <button
+              onClick={() => {
+                setPhase(PHASES.CLIMB);
+                setTimeLeft(4 * 60);
+                speak(`${currentSession.playerName}, you may begin climbing`);
+              }}
+              className="w-full bg-orange-500 hover:bg-orange-600 text-white py-4 rounded-xl font-bold transition-all shadow-lg"
+            >
+              Skip Pre-Climb
+            </button>
+          </>
+        )}
+
+        {phase === PHASES.CLIMB && (
+          <>
+            <div className="text-center space-y-4">
+              <div className="text-8xl font-black tabular-nums text-emerald-400">{formatTime(timeLeft)}</div>
+              <p className="text-slate-400 text-lg">Climbing in progress...</p>
+            </div>
+
+            {boulder.imageUrl && (
+              <div className="relative w-full bg-slate-950 rounded-xl overflow-hidden border-2 border-slate-700">
+                <img 
+                  src={boulder.imageUrl} 
+                  alt="Boulder" 
+                  className="w-full h-full object-contain" 
+                  style={{ minHeight: '200px', maxHeight: '300px' }}
+                />
+                {Object.entries(boulder.holds).map(([holdKey, pos]) => (
+                  <div
+                    key={holdKey}
+                    className="absolute w-10 h-10 rounded-full bg-emerald-500 border-2 border-white flex items-center justify-center text-sm font-bold text-white shadow-lg"
+                    style={{
+                      left: `${pos.x * 100}%`,
+                      top: `${pos.y * 100}%`,
+                      transform: "translate(-50%, -50%)",
+                    }}
+                  >
+                    {HOLD_LABELS[holdKey]}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <button
+              onClick={finishClimb}
+              className="w-full bg-orange-500 hover:bg-orange-600 text-white py-4 rounded-xl font-bold transition-all shadow-lg"
+            >
+              Finished Early - Score Now
+            </button>
+          </>
+        )}
+
+        {phase === PHASES.SCORE && (
+          <>
+            <div className="text-center mb-6">
+              <h3 className="text-2xl font-bold text-white mb-2">Score Boulder {boulderIdx + 1}</h3>
+              <p className="text-sm text-slate-400">{boulder.name}</p>
+              <p className="text-xs text-slate-500 mt-1">{currentSession.playerName}</p>
+            </div>
+
+            {boulder.imageUrl && (
+              <div className="relative w-full bg-slate-950 rounded-xl overflow-hidden border-2 border-slate-700 mb-6">
+                <img 
+                  src={boulder.imageUrl} 
+                  alt="Boulder" 
+                  className="w-full h-full object-contain" 
+                  style={{ minHeight: '250px', maxHeight: '350px' }}
+                />
+                {Object.entries(boulder.holds).map(([holdKey, pos]) => (
+                  <div
+                    key={holdKey}
+                    className={`absolute w-12 h-12 rounded-full border-3 border-white flex items-center justify-center text-base font-bold text-white shadow-lg ${
+                      sessionBoulder.highestHold === holdKey ? 'bg-yellow-500 ring-4 ring-yellow-300' : 'bg-emerald-500'
+                    }`}
+                    style={{
+                      left: `${pos.x * 100}%`,
+                      top: `${pos.y * 100}%`,
+                      transform: "translate(-50%, -50%)",
+                    }}
+                  >
+                    {HOLD_LABELS[holdKey]}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="space-y-5">
+              <div>
+                <label className="block text-sm font-bold mb-3 text-slate-300">Highest Hold Reached</label>
+                <div className="grid grid-cols-3 gap-3">
+                  {HOLD_ORDER.map((hold) => (
+                    <button
+                      key={hold}
+                      onClick={() => setHighestHold(hold)}
+                      className={`py-4 rounded-xl font-bold transition-all shadow-lg ${
+                        sessionBoulder.highestHold === hold
+                          ? "bg-emerald-500 text-white scale-105"
+                          : "bg-slate-800 hover:bg-slate-700 text-slate-300"
+                      }`}
+                    >
+                      {HOLD_LABELS[hold]} ({HOLD_SCORES[hold]})
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-bold mb-3 text-slate-300">Number of Attempts</label>
+                <div className="grid grid-cols-5 gap-2">
+                  {[1, 2, 3, 4, 5].map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => setAttempts(n)}
+                      className={`py-3 rounded-xl font-bold transition-all ${
+                        sessionBoulder.attempts === n
+                          ? "bg-emerald-500 text-white scale-105"
+                          : "bg-slate-800 hover:bg-slate-700 text-slate-300"
+                      }`}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+                <div className="grid grid-cols-5 gap-2 mt-2">
+                  {[6, 7, 8, 9, 10].map((n) => (
+                    <button
+                      key={n}
+                      onClick={() => setAttempts(n)}
+                      className={`py-3 rounded-xl font-bold transition-all ${
+                        sessionBoulder.attempts === n
+                          ? "bg-emerald-500 text-white scale-105"
+                          : "bg-slate-800 hover:bg-slate-700 text-slate-300"
+                      }`}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+                <div className="text-xs text-slate-400 mt-3 bg-slate-800/50 rounded-lg p-3">
+                  Final Score: <span className="text-emerald-400 font-bold text-lg">{computeScore(sessionBoulder.highestHold, sessionBoulder.attempts)}</span>
+                  <span className="ml-2">(Base: {HOLD_SCORES[sessionBoulder.highestHold] || 0}, Penalty: -{(sessionBoulder.attempts * 0.1).toFixed(1)})</span>
+                </div>
+              </div>
+
+              <button
+                onClick={nextTurn}
+                disabled={!sessionBoulder.highestHold}
+                className="w-full bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white py-5 rounded-xl font-bold text-lg shadow-2xl transition-all"
+              >
+                {playerIdx < sessions.length - 1 
+                  ? "Next Player →" 
+                  : boulderIdx < 3 
+                    ? "Next Boulder →" 
+                    : "Finish Comp 🎉"}
+              </button>
+            </div>
+          </>
+        )}
+
+        {phase === PHASES.REST && (
+          <>
+            <div className="text-center space-y-4">
+              <h3 className="text-3xl font-bold text-white">Rest Period</h3>
+              <div className="text-7xl font-black tabular-nums text-orange-400">{formatTime(timeLeft)}</div>
+              <p className="text-slate-400 text-lg">
+                {playerIdx < sessions.length - 1 
+                  ? `${sessions[playerIdx + 1].playerName} up next on ${boulder.name}`
+                  : boulderIdx < 3
+                    ? `Moving to Boulder ${boulderIdx + 2} - ${sessions[0].playerName} will go first`
+                    : "Great climbing everyone!"}
+              </p>
+            </div>
+
+            <button
+              onClick={skipRest}
+              className="w-full bg-slate-800 hover:bg-slate-700 text-white py-4 rounded-xl font-bold transition-all"
+            >
+              Skip Rest
+            </button>
+          </>
+        )}
       </div>
     </div>
   );
