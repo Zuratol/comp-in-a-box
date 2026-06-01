@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Plus, Trash2, Users, Trophy, Home, ChevronLeft, Copy, Check, Settings, Mountain } from "lucide-react";
+import { Plus, Trash2, Users, Trophy, Home, ChevronLeft, Copy, Check, Settings, Mountain, Clock } from "lucide-react";
 
 // Speech helper
 function speak(text) {
@@ -47,11 +47,18 @@ function fromShareCode(code) {
   return JSON.parse(decodeURIComponent(atob(String(code || "").trim())));
 }
 
+// Get the canonical ID for leaderboard grouping
+// Original comps: canonicalId === id. Imported comps: canonicalId = original id.
+function getCanonicalId(comp) {
+  return comp.canonicalId || comp.id;
+}
+
 export default function App() {
   const [screen, setScreen] = useState("home");
   const [comps, setComps] = useState([]);
   const [activeComp, setActiveComp] = useState(null);
   const [activeSession, setActiveSession] = useState(null);
+  const [activeTiming, setActiveTiming] = useState(null);
 
   // Load comps from localStorage
   useEffect(() => {
@@ -69,7 +76,7 @@ export default function App() {
       localStorage.setItem("comps", JSON.stringify(comps));
       setSaveError("");
     } catch (err) {
-      setSaveError(`Could not save to device storage: ${err && err.message ? err.message : String(err)}. Your comp may not persist after closing the app (images may be too large).`);
+      setSaveError(`Could not save to device storage: ${err && err.message ? err.message : String(err)}. Images may be too large.`);
     }
   }, [comps]);
 
@@ -125,11 +132,12 @@ export default function App() {
           {screen === "pre-run" && activeComp && (
             <PreRunScreen
               comp={activeComp}
+              allComps={comps}
               onBack={() => {
                 setActiveComp(null);
                 setScreen("home");
               }}
-              onStartRun={(playerNames) => {
+              onStartRun={(playerNames, timing) => {
                 const sessions = playerNames.map(name => ({
                   id: `session-${Date.now()}-${Math.random()}`,
                   compId: activeComp.id,
@@ -139,6 +147,7 @@ export default function App() {
                   boulders: activeComp.boulders.map(() => ({ highestHold: null, attempts: 1 })),
                 }));
                 setActiveSession(sessions);
+                setActiveTiming(timing);
                 setScreen("run");
               }}
             />
@@ -148,6 +157,7 @@ export default function App() {
             <RunScreen
               comp={activeComp}
               sessions={activeSession}
+              timing={activeTiming}
               onUpdateSessions={setActiveSession}
               onComplete={(completedSessions) => {
                 completedSessions.forEach(session => {
@@ -155,11 +165,13 @@ export default function App() {
                 });
                 setActiveSession(null);
                 setActiveComp(null);
+                setActiveTiming(null);
                 setScreen("home");
               }}
               onExit={() => {
                 setActiveSession(null);
                 setActiveComp(null);
+                setActiveTiming(null);
                 setScreen("home");
               }}
             />
@@ -175,30 +187,30 @@ function HomeScreen({ comps, onNewComp, onRunComp, onImport, onDeleteComp }) {
   const [importError, setImportError] = useState("");
   const [showImport, setShowImport] = useState(false);
 
+  // Global leaderboard — groups sessions across comps that share the same canonicalId
   const allSessions = useMemo(() => {
     const sessions = [];
     comps.forEach((c) => {
-      (c.sessions || []).forEach((s) => sessions.push(s));
+      (c.sessions || []).forEach((s) => sessions.push({ ...s, compName: c.name }));
     });
     return sessions.sort((a, b) => {
-      const aTotal = parseFloat(computeTotal(a.boulders));
-      const bTotal = parseFloat(computeTotal(b.boulders));
-      return bTotal - aTotal;
+      return parseFloat(computeTotal(b.boulders)) - parseFloat(computeTotal(a.boulders));
     }).slice(0, 10);
   }, [comps]);
 
   const handleImport = () => {
     try {
-      const payload = fromShareCode(shareCode);
+      const payload = fromShareCode(shareCode.trim());
       if (!payload || !payload.comp) throw new Error("Invalid");
-      
+
       const imported = {
         ...payload.comp,
         id: `comp-${Date.now()}`,
+        canonicalId: payload.comp.canonicalId || payload.comp.id, // preserve link for shared leaderboard
         importedAt: new Date().toISOString(),
         sessions: [],
       };
-      
+
       onImport(imported);
       setShareCode("");
       setShowImport(false);
@@ -269,11 +281,7 @@ function HomeScreen({ comps, onNewComp, onRunComp, onImport, onDeleteComp }) {
           {importError && <p className="text-sm text-red-400 flex items-center gap-2">⚠️ {importError}</p>}
           <div className="flex gap-3">
             <button
-              onClick={() => {
-                setShowImport(false);
-                setShareCode("");
-                setImportError("");
-              }}
+              onClick={() => { setShowImport(false); setShareCode(""); setImportError(""); }}
               className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 py-3 rounded-xl font-semibold transition-all"
             >
               Cancel
@@ -304,6 +312,9 @@ function HomeScreen({ comps, onNewComp, onRunComp, onImport, onDeleteComp }) {
                   <div className="font-semibold text-lg text-white truncate">{comp.name}</div>
                   <div className="text-sm text-slate-400">
                     {comp.sessions?.length || 0} run{comp.sessions?.length !== 1 ? 's' : ''} • 4 boulders
+                    {comp.canonicalId && comp.canonicalId !== comp.id && (
+                      <span className="ml-2 text-cyan-400">• shared</span>
+                    )}
                   </div>
                 </div>
                 <div className="flex gap-2 ml-4">
@@ -380,10 +391,20 @@ function CreateCompScreen({ onBack, onCreate }) {
 
   const boulder = boulders[currentBoulder];
   const nextHold = HOLD_ORDER.find((h) => !boulder.holds[h]);
-  
-  const isValid = name.trim() && boulders.every((b) => 
-    b.imageUrl && b.holds.start && b.holds.top
-  );
+
+  // Detailed validation: what's missing?
+  const missingItems = useMemo(() => {
+    const missing = [];
+    if (!name.trim()) missing.push("Comp name (required)");
+    boulders.forEach((b, i) => {
+      if (!b.imageUrl) missing.push(`Boulder ${i + 1}: no photo`);
+      else if (!b.holds.start) missing.push(`Boulder ${i + 1}: no start hold marked`);
+      else if (!b.holds.top) missing.push(`Boulder ${i + 1}: no top hold marked`);
+    });
+    return missing;
+  }, [name, boulders]);
+
+  const isValid = missingItems.length === 0;
 
   const handleImageUpload = (e) => {
     const file = e.target.files?.[0];
@@ -408,11 +429,9 @@ function CreateCompScreen({ onBack, onCreate }) {
 
   const handleImageClick = (e) => {
     if (!nextHold) return;
-    
     const rect = e.currentTarget.getBoundingClientRect();
     const x = (e.clientX - rect.left) / rect.width;
     const y = (e.clientY - rect.top) / rect.height;
-    
     setBoulders((prev) => {
       const updated = [...prev];
       updated[currentBoulder] = {
@@ -433,9 +452,10 @@ function CreateCompScreen({ onBack, onCreate }) {
 
   const handleCreate = () => {
     if (!isValid) return;
-    
+    const id = `comp-${Date.now()}`;
     onCreate({
-      id: `comp-${Date.now()}`,
+      id,
+      canonicalId: id, // original comp — canonical = self
       name: name.trim(),
       createdAt: new Date().toISOString(),
       boulders,
@@ -459,14 +479,21 @@ function CreateCompScreen({ onBack, onCreate }) {
 
       <div className="bg-slate-900/60 backdrop-blur-xl rounded-2xl p-6 border border-slate-700/50 space-y-4">
         <div>
-          <label className="block text-sm font-semibold mb-2 text-slate-300">Comp Name</label>
+          <label className="block text-sm font-semibold mb-2 text-slate-300">
+            Comp Name <span className="text-red-400">*</span>
+          </label>
           <input
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="e.g., Friday Night Comp"
-            className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 focus:outline-none text-white placeholder-slate-500"
+            className={`w-full bg-slate-800/50 border rounded-xl px-4 py-3 focus:ring-2 focus:outline-none text-white placeholder-slate-500 ${
+              !name.trim() ? "border-red-500/50 focus:border-red-500 focus:ring-red-500/20" : "border-slate-700 focus:border-emerald-500 focus:ring-emerald-500/20"
+            }`}
           />
+          {!name.trim() && (
+            <p className="text-xs text-red-400 mt-1">⚠️ A comp name is required to continue</p>
+          )}
         </div>
       </div>
 
@@ -531,7 +558,7 @@ function CreateCompScreen({ onBack, onCreate }) {
                   Reset
                 </button>
               </div>
-              
+
               {nextHold && (
                 <div className="bg-gradient-to-r from-emerald-500/20 to-cyan-500/20 border border-emerald-500/50 rounded-xl p-4 mb-4">
                   <div className="text-sm font-semibold text-emerald-300">
@@ -544,16 +571,16 @@ function CreateCompScreen({ onBack, onCreate }) {
                   </div>
                 </div>
               )}
-              
+
               <div
                 className="relative w-full bg-slate-950 rounded-xl overflow-hidden cursor-crosshair border-2 border-emerald-500/50 hover:border-emerald-500 transition-all shadow-2xl"
                 onClick={handleImageClick}
                 style={{ minHeight: '400px', maxHeight: '600px' }}
               >
-                <img 
-                  src={boulder.imageUrl} 
-                  alt="Boulder" 
-                  className="w-full h-full object-contain pointer-events-none select-none" 
+                <img
+                  src={boulder.imageUrl}
+                  alt="Boulder"
+                  className="w-full h-full object-contain pointer-events-none select-none"
                   style={{ minHeight: '400px', maxHeight: '600px' }}
                 />
                 {Object.entries(boulder.holds).map(([holdKey, pos]) => (
@@ -590,32 +617,107 @@ function CreateCompScreen({ onBack, onCreate }) {
         )}
       </div>
 
+      {/* What's missing checklist */}
+      {!isValid && (
+        <div className="bg-orange-900/30 border border-orange-500/50 rounded-2xl p-5 space-y-2">
+          <div className="text-sm font-bold text-orange-300 mb-3">⚠️ Complete these to unlock the comp:</div>
+          {missingItems.map((item, i) => (
+            <div key={i} className="flex items-center gap-2 text-sm text-orange-200">
+              <div className="w-2 h-2 rounded-full bg-orange-400 flex-shrink-0"></div>
+              {item}
+            </div>
+          ))}
+        </div>
+      )}
+
       <button
         onClick={handleCreate}
         disabled={!isValid}
         className="w-full bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white py-4 rounded-2xl font-bold text-lg shadow-2xl transition-all hover:scale-105"
       >
-        {isValid ? "Create Comp & Continue →" : "Complete all boulders to continue"}
+        {isValid ? "Create Comp & Continue →" : "Complete checklist above to continue"}
       </button>
     </div>
   );
 }
 
-function PreRunScreen({ comp, onBack, onStartRun }) {
+// Time picker: a row of preset buttons + custom input (in minutes)
+function TimePicker({ label, valueSeconds, onChange, presets }) {
+  const valueMins = Math.round(valueSeconds / 60);
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <label className="text-sm font-semibold text-slate-300">{label}</label>
+        <span className="text-emerald-400 font-bold text-sm">{formatTime(valueSeconds)}</span>
+      </div>
+      <div className="flex gap-2 flex-wrap">
+        {presets.map((p) => (
+          <button
+            key={p.value}
+            onClick={() => onChange(p.value)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+              valueSeconds === p.value
+                ? "bg-emerald-500 text-white"
+                : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+            }`}
+            type="button"
+          >
+            {p.label}
+          </button>
+        ))}
+        <div className="flex items-center gap-1 bg-slate-800 rounded-lg px-2">
+          <input
+            type="number"
+            min={1}
+            max={60}
+            value={valueMins}
+            onChange={(e) => {
+              const v = Math.max(1, Math.min(60, parseInt(e.target.value) || 1));
+              onChange(v * 60);
+            }}
+            className="w-10 bg-transparent text-white text-xs text-center focus:outline-none py-1.5"
+          />
+          <span className="text-slate-400 text-xs">min</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PreRunScreen({ comp, allComps, onBack, onStartRun }) {
   const [players, setPlayers] = useState([""]);
-  const [showShareCode, setShowShareCode] = useState(false);
+  const [showShareCode, setShowShareCode] = useState(true); // show by default
   const [copied, setCopied] = useState(false);
+  const [showTimingSettings, setShowTimingSettings] = useState(false);
+
+  // Timing settings (in seconds)
+  const [preclimbTime, setPreclimbTime] = useState(10);
+  const [climbTime, setClimbTime] = useState(4 * 60);
+  const [restTime, setRestTime] = useState(2 * 60);
 
   const shareCode = useMemo(() => {
-    return toShareCode({ comp: { ...comp, sessions: [] } });
+    return toShareCode({
+      comp: {
+        ...comp,
+        sessions: [],
+        canonicalId: comp.canonicalId || comp.id,
+      }
+    });
   }, [comp]);
 
+  // Shared leaderboard: all sessions from comps sharing the same canonicalId
   const leaderboard = useMemo(() => {
-    return (comp.sessions || [])
-      .slice()
+    const canonId = getCanonicalId(comp);
+    const sessions = [];
+    allComps.forEach((c) => {
+      if (getCanonicalId(c) === canonId) {
+        (c.sessions || []).forEach((s) => sessions.push({ ...s, compName: c.name }));
+      }
+    });
+    return sessions
       .sort((a, b) => parseFloat(computeTotal(b.boulders)) - parseFloat(computeTotal(a.boulders)))
-      .slice(0, 5);
-  }, [comp.sessions]);
+      .slice(0, 10);
+  }, [comp, allComps]);
 
   const handleCopy = async () => {
     try {
@@ -626,15 +728,11 @@ function PreRunScreen({ comp, onBack, onStartRun }) {
   };
 
   const addPlayer = () => {
-    if (players.length < 8) {
-      setPlayers([...players, ""]);
-    }
+    if (players.length < 8) setPlayers([...players, ""]);
   };
 
   const removePlayer = (idx) => {
-    if (players.length > 1) {
-      setPlayers(players.filter((_, i) => i !== idx));
-    }
+    if (players.length > 1) setPlayers(players.filter((_, i) => i !== idx));
   };
 
   const updatePlayer = (idx, value) => {
@@ -653,33 +751,103 @@ function PreRunScreen({ comp, onBack, onStartRun }) {
           <ChevronLeft className="w-5 h-5" />
           <span className="font-semibold">Back</span>
         </button>
-        <h2 className="text-xl font-bold text-white truncate max-w-[250px]">{comp.name}</h2>
+        <h2 className="text-xl font-bold text-white truncate max-w-[200px]">{comp.name}</h2>
         <button
-          onClick={() => setShowShareCode(!showShareCode)}
+          onClick={() => setShowTimingSettings(!showTimingSettings)}
           className="p-2 bg-slate-800 hover:bg-slate-700 rounded-xl transition-all"
+          title="Timing settings"
         >
-          <Copy className="w-5 h-5 text-slate-400" />
+          <Clock className="w-5 h-5 text-slate-400" />
         </button>
       </div>
 
-      {showShareCode && (
-        <div className="bg-slate-900/60 backdrop-blur-xl rounded-2xl p-6 border border-slate-700/50 space-y-4">
-          <h3 className="font-bold text-lg text-white">Share Code</h3>
-          <textarea
-            value={shareCode}
-            readOnly
-            className="w-full bg-slate-800/50 rounded-xl p-4 text-xs min-h-[90px] border border-slate-700 font-mono text-slate-300"
-          />
+      {/* Share code — prominent at the top */}
+      <div className="bg-gradient-to-br from-cyan-900/40 to-blue-900/40 backdrop-blur-xl rounded-2xl p-6 border border-cyan-500/30 shadow-xl space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-cyan-500/20 rounded-lg">
+              <Copy className="w-5 h-5 text-cyan-400" />
+            </div>
+            <div>
+              <h3 className="font-bold text-lg text-white">Share Code</h3>
+              <p className="text-xs text-slate-400">Give this to others so they can compete on the same boulders & join your leaderboard</p>
+            </div>
+          </div>
           <button
-            onClick={handleCopy}
-            className="w-full bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 shadow-lg"
+            onClick={() => setShowShareCode(!showShareCode)}
+            className="text-xs text-slate-400 hover:text-white"
           >
-            {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-            {copied ? "Copied!" : "Copy Share Code"}
+            {showShareCode ? "Hide" : "Show"}
           </button>
+        </div>
+
+        {showShareCode && (
+          <>
+            <textarea
+              value={shareCode}
+              readOnly
+              className="w-full bg-slate-800/50 rounded-xl p-4 text-xs min-h-[80px] border border-slate-700 font-mono text-slate-300"
+            />
+            <button
+              onClick={handleCopy}
+              className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 text-white py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 shadow-lg"
+            >
+              {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+              {copied ? "Copied!" : "Copy Share Code"}
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* Timing settings */}
+      {showTimingSettings && (
+        <div className="bg-slate-900/60 backdrop-blur-xl rounded-2xl p-6 border border-slate-700/50 space-y-5">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-orange-500/20 rounded-lg">
+              <Clock className="w-5 h-5 text-orange-400" />
+            </div>
+            <h3 className="font-bold text-lg text-white">Timing Settings</h3>
+          </div>
+
+          <TimePicker
+            label="Pre-Climb (Transition)"
+            valueSeconds={preclimbTime}
+            onChange={setPreclimbTime}
+            presets={[
+              { label: "10s", value: 10 },
+              { label: "30s", value: 30 },
+              { label: "1 min", value: 60 },
+              { label: "2 min", value: 120 },
+            ]}
+          />
+
+          <TimePicker
+            label="Climb Time"
+            valueSeconds={climbTime}
+            onChange={setClimbTime}
+            presets={[
+              { label: "3 min", value: 3 * 60 },
+              { label: "4 min", value: 4 * 60 },
+              { label: "5 min", value: 5 * 60 },
+              { label: "6 min", value: 6 * 60 },
+            ]}
+          />
+
+          <TimePicker
+            label="Rest Time"
+            valueSeconds={restTime}
+            onChange={setRestTime}
+            presets={[
+              { label: "1 min", value: 60 },
+              { label: "2 min", value: 2 * 60 },
+              { label: "3 min", value: 3 * 60 },
+              { label: "5 min", value: 5 * 60 },
+            ]}
+          />
         </div>
       )}
 
+      {/* Leaderboard */}
       {leaderboard.length > 0 && (
         <div className="bg-slate-900/60 backdrop-blur-xl rounded-2xl p-6 border border-slate-700/50 space-y-4">
           <div className="flex items-center gap-3">
@@ -687,13 +855,21 @@ function PreRunScreen({ comp, onBack, onStartRun }) {
               <Trophy className="w-5 h-5 text-yellow-400" />
             </div>
             <h3 className="font-bold text-lg text-white">Leaderboard</h3>
+            <span className="text-xs text-slate-400">(all runs on this comp)</span>
           </div>
           <div className="space-y-2">
             {leaderboard.map((session, i) => (
               <div key={session.id} className="flex items-center justify-between bg-slate-800/60 rounded-xl p-3 border border-slate-700/50">
                 <div className="flex items-center gap-3">
-                  <span className="text-slate-400 font-bold w-8">#{i + 1}</span>
-                  <span className="font-semibold text-white">{session.playerName}</span>
+                  <span className="text-slate-400 font-bold w-8">
+                    {i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `#${i + 1}`}
+                  </span>
+                  <div>
+                    <span className="font-semibold text-white">{session.playerName}</span>
+                    {session.compName !== comp.name && (
+                      <div className="text-xs text-slate-500">{session.compName}</div>
+                    )}
+                  </div>
                 </div>
                 <span className="font-bold text-emerald-400 text-lg">{computeTotal(session.boulders)}</span>
               </div>
@@ -702,6 +878,7 @@ function PreRunScreen({ comp, onBack, onStartRun }) {
         </div>
       )}
 
+      {/* Players */}
       <div className="bg-slate-900/60 backdrop-blur-xl rounded-2xl p-6 border border-slate-700/50 space-y-4">
         <div className="flex items-center gap-3">
           <div className="p-2 bg-cyan-500/20 rounded-lg">
@@ -740,7 +917,7 @@ function PreRunScreen({ comp, onBack, onStartRun }) {
           )}
         </div>
         <button
-          onClick={() => onStartRun(validPlayers)}
+          onClick={() => onStartRun(validPlayers, { preclimbTime, climbTime, restTime })}
           disabled={!canStart}
           className="w-full bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white py-4 rounded-xl font-bold text-lg shadow-2xl transition-all"
         >
@@ -751,11 +928,15 @@ function PreRunScreen({ comp, onBack, onStartRun }) {
   );
 }
 
-function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
+function RunScreen({ comp, sessions, timing, onUpdateSessions, onComplete, onExit }) {
+  const climbTime = timing?.climbTime ?? 4 * 60;
+  const restTime = timing?.restTime ?? 2 * 60;
+  const preclimbTime = timing?.preclimbTime ?? 10;
+
   const [boulderIdx, setBoulderIdx] = useState(0);
   const [playerIdx, setPlayerIdx] = useState(0);
   const [phase, setPhase] = useState(PHASES.READY);
-  const [timeLeft, setTimeLeft] = useState(10);
+  const [timeLeft, setTimeLeft] = useState(preclimbTime);
   const [showExitConfirm, setShowExitConfirm] = useState(false);
   const [showResults, setShowResults] = useState(false);
   const [shareCode, setShareCode] = useState("");
@@ -774,17 +955,17 @@ function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
       if (newTime === 0) {
         if (phase === PHASES.READY) {
           setPhase(PHASES.CLIMB);
-          setTimeLeft(4 * 60);
+          setTimeLeft(climbTime);
           speak(`${currentSession.playerName}, you may begin climbing`);
         } else if (phase === PHASES.REST) {
           setPhase(PHASES.READY);
-          setTimeLeft(10);
+          setTimeLeft(preclimbTime);
         }
       }
       return newTime;
     }), 1000);
     return () => clearInterval(timer);
-  }, [tickEnabled, timeLeft, phase, currentSession.playerName]);
+  }, [tickEnabled, timeLeft, phase, currentSession.playerName, climbTime, preclimbTime]);
 
   useEffect(() => {
     if (phase === PHASES.READY) {
@@ -796,16 +977,14 @@ function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
     }
   }, [phase, timeLeft]);
 
-  const finishClimb = () => {
-    setPhase(PHASES.SCORE);
-  };
+  const finishClimb = () => setPhase(PHASES.SCORE);
 
   const setHighestHold = (hold) => {
     onUpdateSessions((prev) => {
       const updated = [...prev];
       updated[playerIdx] = {
         ...updated[playerIdx],
-        boulders: updated[playerIdx].boulders.map((b, i) => 
+        boulders: updated[playerIdx].boulders.map((b, i) =>
           i === boulderIdx ? { ...b, highestHold: hold } : b
         )
       };
@@ -818,7 +997,7 @@ function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
       const updated = [...prev];
       updated[playerIdx] = {
         ...updated[playerIdx],
-        boulders: updated[playerIdx].boulders.map((b, i) => 
+        boulders: updated[playerIdx].boulders.map((b, i) =>
           i === boulderIdx ? { ...b, attempts } : b
         )
       };
@@ -830,14 +1009,20 @@ function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
     if (playerIdx < sessions.length - 1) {
       setPlayerIdx(playerIdx + 1);
       setPhase(PHASES.REST);
-      setTimeLeft(2 * 60);
+      setTimeLeft(restTime);
     } else if (boulderIdx < 3) {
       setBoulderIdx(boulderIdx + 1);
       setPlayerIdx(0);
       setPhase(PHASES.REST);
-      setTimeLeft(2 * 60);
+      setTimeLeft(restTime);
     } else {
-      const code = toShareCode({ comp: { ...comp, sessions: [] } });
+      const code = toShareCode({
+        comp: {
+          ...comp,
+          sessions: [],
+          canonicalId: comp.canonicalId || comp.id,
+        }
+      });
       setShareCode(code);
       setShowResults(true);
     }
@@ -861,29 +1046,26 @@ function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
 
   const skipRest = () => {
     setPhase(PHASES.READY);
-    setTimeLeft(10);
+    setTimeLeft(preclimbTime);
   };
 
   useEffect(() => {
     if (phase === PHASES.REST && timeLeft === 0) {
       setPhase(PHASES.READY);
-      setTimeLeft(10);
+      setTimeLeft(preclimbTime);
     }
-  }, [phase, timeLeft]);
+  }, [phase, timeLeft, preclimbTime]);
 
   const handleExit = () => {
-    if (phase === PHASES.CLIMB) {
-      setShowExitConfirm(true);
-    } else {
-      onExit();
-    }
+    if (phase === PHASES.CLIMB) setShowExitConfirm(true);
+    else onExit();
   };
 
   return (
     <div className="space-y-4 pb-8">
       {showResults && (
         <div className="fixed inset-0 bg-black/90 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 rounded-3xl p-8 max-w-md w-full space-y-6 border border-slate-700 shadow-2xl">
+          <div className="bg-slate-900 rounded-3xl p-8 max-w-md w-full space-y-6 border border-slate-700 shadow-2xl overflow-y-auto max-h-[90vh]">
             <div className="text-center">
               <div className="inline-block p-4 bg-yellow-500/20 rounded-full mb-4">
                 <Trophy className="w-12 h-12 text-yellow-400" />
@@ -909,13 +1091,13 @@ function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
                 ))}
             </div>
 
-            <div className="bg-slate-800/50 rounded-2xl p-5 space-y-4">
+            <div className="bg-gradient-to-br from-cyan-900/40 to-blue-900/40 rounded-2xl p-5 space-y-4 border border-cyan-500/30">
               <div className="flex items-center gap-2">
                 <Copy className="w-5 h-5 text-cyan-400" />
                 <h4 className="font-bold text-white">Share This Comp</h4>
               </div>
               <p className="text-xs text-slate-400">
-                Share this code so others can compete on the same boulders!
+                Share this code so others can compete on the same boulders and join the leaderboard!
               </p>
               <textarea
                 value={shareCode}
@@ -954,10 +1136,7 @@ function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
                 Cancel
               </button>
               <button
-                onClick={() => {
-                  setShowExitConfirm(false);
-                  onExit();
-                }}
+                onClick={() => { setShowExitConfirm(false); onExit(); }}
                 className="flex-1 bg-red-500 hover:bg-red-600 py-3 rounded-xl font-semibold text-white"
               >
                 Exit Run
@@ -988,8 +1167,8 @@ function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
             .map((s, i) => ({ ...s, index: i, total: computeTotal(s.boulders) }))
             .sort((a, b) => parseFloat(b.total) - parseFloat(a.total))
             .map((s, rank) => (
-              <div 
-                key={s.index} 
+              <div
+                key={s.index}
                 className={`flex justify-between text-sm py-2 px-3 rounded-lg ${
                   s.index === playerIdx ? 'bg-emerald-500/20 text-emerald-300 font-bold' : 'text-slate-300'
                 }`}
@@ -1017,10 +1196,10 @@ function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
 
             {boulder.imageUrl && (
               <div className="relative w-full bg-slate-950 rounded-xl overflow-hidden border-2 border-slate-700">
-                <img 
-                  src={boulder.imageUrl} 
-                  alt="Boulder" 
-                  className="w-full h-full object-contain" 
+                <img
+                  src={boulder.imageUrl}
+                  alt="Boulder"
+                  className="w-full h-full object-contain"
                   style={{ minHeight: '300px', maxHeight: '400px' }}
                 />
                 {Object.entries(boulder.holds).map(([holdKey, pos]) => (
@@ -1042,7 +1221,7 @@ function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
             <button
               onClick={() => {
                 setPhase(PHASES.CLIMB);
-                setTimeLeft(4 * 60);
+                setTimeLeft(climbTime);
                 speak(`${currentSession.playerName}, you may begin climbing`);
               }}
               className="w-full bg-orange-500 hover:bg-orange-600 text-white py-4 rounded-xl font-bold transition-all shadow-lg"
@@ -1061,10 +1240,10 @@ function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
 
             {boulder.imageUrl && (
               <div className="relative w-full bg-slate-950 rounded-xl overflow-hidden border-2 border-slate-700">
-                <img 
-                  src={boulder.imageUrl} 
-                  alt="Boulder" 
-                  className="w-full h-full object-contain" 
+                <img
+                  src={boulder.imageUrl}
+                  alt="Boulder"
+                  className="w-full h-full object-contain"
                   style={{ minHeight: '200px', maxHeight: '300px' }}
                 />
                 {Object.entries(boulder.holds).map(([holdKey, pos]) => (
@@ -1102,10 +1281,10 @@ function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
 
             {boulder.imageUrl && (
               <div className="relative w-full bg-slate-950 rounded-xl overflow-hidden border-2 border-slate-700 mb-6">
-                <img 
-                  src={boulder.imageUrl} 
-                  alt="Boulder" 
-                  className="w-full h-full object-contain" 
+                <img
+                  src={boulder.imageUrl}
+                  alt="Boulder"
+                  className="w-full h-full object-contain"
                   style={{ minHeight: '250px', maxHeight: '350px' }}
                 />
                 {Object.entries(boulder.holds).map(([holdKey, pos]) => (
@@ -1189,10 +1368,10 @@ function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
                 disabled={!sessionBoulder.highestHold}
                 className="w-full bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 disabled:from-slate-800 disabled:to-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white py-5 rounded-xl font-bold text-lg shadow-2xl transition-all"
               >
-                {playerIdx < sessions.length - 1 
-                  ? "Next Player →" 
-                  : boulderIdx < 3 
-                    ? "Next Boulder →" 
+                {playerIdx < sessions.length - 1
+                  ? "Next Player →"
+                  : boulderIdx < 3
+                    ? "Next Boulder →"
                     : "Finish Comp 🎉"}
               </button>
             </div>
@@ -1205,7 +1384,7 @@ function RunScreen({ comp, sessions, onUpdateSessions, onComplete, onExit }) {
               <h3 className="text-3xl font-bold text-white">Rest Period</h3>
               <div className="text-7xl font-black tabular-nums text-orange-400">{formatTime(timeLeft)}</div>
               <p className="text-slate-400 text-lg">
-                {playerIdx < sessions.length - 1 
+                {playerIdx < sessions.length - 1
                   ? `${sessions[playerIdx + 1].playerName} up next on ${boulder.name}`
                   : boulderIdx < 3
                     ? `Moving to Boulder ${boulderIdx + 2} - ${sessions[0].playerName} will go first`
