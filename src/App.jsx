@@ -61,11 +61,16 @@ export default function App() {
     } catch {}
   }, []);
 
+  const [saveError, setSaveError] = useState("");
+
   // Save comps to localStorage
   useEffect(() => {
     try {
       localStorage.setItem("comps", JSON.stringify(comps));
-    } catch {}
+      setSaveError("");
+    } catch (err) {
+      setSaveError(`Could not save to device storage: ${err && err.message ? err.message : String(err)}. Your comp may not persist after closing the app (images may be too large).`);
+    }
   }, [comps]);
 
   const saveSession = (compId, session) => {
@@ -86,6 +91,9 @@ export default function App() {
       <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-emerald-900/20 via-transparent to-transparent"></div>
       <div className="relative min-h-screen">
         <div className="max-w-2xl mx-auto px-4 py-6">
+          {saveError && (
+            <div className="mb-4 bg-red-900/60 border border-red-500 rounded-lg p-3 text-xs text-red-300">{saveError}</div>
+          )}
           {screen === "home" && (
             <HomeScreen
               comps={comps}
@@ -357,6 +365,8 @@ function HomeScreen({ comps, onNewComp, onRunComp, onImport, onDeleteComp }) {
   );
 }
 
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // 2 MB soft warning threshold
+
 function CreateCompScreen({ onBack, onCreate }) {
   const [name, setName] = useState("");
   const [boulders, setBoulders] = useState([
@@ -366,6 +376,7 @@ function CreateCompScreen({ onBack, onCreate }) {
     { id: 4, name: "Boulder 4", imageUrl: "", holds: {} },
   ]);
   const [currentBoulder, setCurrentBoulder] = useState(0);
+  const [imageUploadError, setImageUploadError] = useState("");
 
   const boulder = boulders[currentBoulder];
   const nextHold = HOLD_ORDER.find((h) => !boulder.holds[h]);
@@ -377,7 +388,10 @@ function CreateCompScreen({ onBack, onCreate }) {
   const handleImageUpload = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    
+    setImageUploadError("");
+    if (file.size > MAX_IMAGE_BYTES) {
+      setImageUploadError(`Image is ${(file.size / 1024 / 1024).toFixed(1)} MB — large images may fail to save. Consider resizing it first.`);
+    }
     const reader = new FileReader();
     reader.onload = (ev) => {
       setBoulders((prev) => {
@@ -385,6 +399,9 @@ function CreateCompScreen({ onBack, onCreate }) {
         updated[currentBoulder] = { ...updated[currentBoulder], imageUrl: String(ev.target.result) };
         return updated;
       });
+    };
+    reader.onerror = () => {
+      setImageUploadError(`Failed to read image: ${reader.error ? reader.error.message : "unknown error"} (code ${reader.error ? reader.error.code : "?"})`);
     };
     reader.readAsDataURL(file);
   };
@@ -460,7 +477,7 @@ function CreateCompScreen({ onBack, onCreate }) {
             {boulders.map((_, i) => (
               <button
                 key={i}
-                onClick={() => setCurrentBoulder(i)}
+                onClick={() => { setCurrentBoulder(i); setImageUploadError(""); }}
                 className={`w-12 h-12 rounded-xl font-bold text-sm transition-all ${
                   i === currentBoulder
                     ? "bg-gradient-to-br from-emerald-500 to-emerald-600 text-white shadow-lg"
@@ -498,6 +515,9 @@ function CreateCompScreen({ onBack, onCreate }) {
             onChange={handleImageUpload}
             className="w-full text-sm text-slate-300 file:mr-4 file:py-3 file:px-6 file:rounded-xl file:border-0 file:bg-gradient-to-r file:from-emerald-500 file:to-emerald-600 file:text-white hover:file:from-emerald-600 hover:file:to-emerald-700 file:cursor-pointer file:font-semibold file:shadow-lg"
           />
+          {imageUploadError && (
+            <div className="mt-2 text-xs text-red-400 bg-red-900/30 border border-red-700 rounded-lg px-3 py-2">{imageUploadError}</div>
+          )}
         </div>
 
         {boulder.imageUrl && (
