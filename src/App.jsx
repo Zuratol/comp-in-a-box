@@ -4,6 +4,25 @@ import { QRCodeSVG } from "qrcode.react";
 
 const APP_URL = "https://compinbox.netlify.app";
 
+// Compress an image dataUrl via canvas — resizes to maxPx, encodes at given quality
+function compressImage(dataUrl, maxPx = 900, quality = 0.65) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxPx / Math.max(img.width, img.height));
+      const w = Math.round(img.width * scale);
+      const h = Math.round(img.height * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    img.onerror = () => resolve(dataUrl); // fallback: return original
+    img.src = dataUrl;
+  });
+}
+
 // Lite share code — no images, just structure. Small enough for a QR code.
 function toLiteShareCode(comp) {
   const lite = {
@@ -15,16 +34,45 @@ function toLiteShareCode(comp) {
         id: b.id,
         name: b.name,
         holds: b.holds,
-        // no imageUrl
       })),
       sessions: [],
     },
-    lite: true, // flag so app knows photos are missing
+    lite: true,
   };
   return toShareCode(lite);
 }
 
-function buildQrUrl(comp) {
+// Upload comp to Netlify Blob storage, return a short ID
+async function uploadComp(comp) {
+  const payload = {
+    comp: {
+      ...comp,
+      sessions: [],
+      canonicalId: comp.canonicalId || comp.id,
+    },
+  };
+  const res = await fetch("/api/comp", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+  const { id } = await res.json();
+  return id;
+}
+
+// Fetch comp from Netlify Blob storage by short ID
+async function fetchComp(id) {
+  const res = await fetch(`/api/comp?id=${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+  return res.json();
+}
+
+function buildQrUrl(shortId) {
+  return `${APP_URL}/?c=${shortId}`;
+}
+
+function buildLiteQrUrl(comp) {
   return `${APP_URL}/?import=${encodeURIComponent(toLiteShareCode(comp))}`;
 }
 
@@ -95,34 +143,59 @@ export default function App() {
     } catch {}
   }, []);
 
-  // Auto-import from QR code URL (?import=CODE)
+  // Auto-import from QR code URL (?c=SHORT_ID or ?import=LITE_CODE)
   useEffect(() => {
-    try {
-      const params = new URLSearchParams(window.location.search);
-      const importCode = params.get("import");
-      if (!importCode) return;
+    const params = new URLSearchParams(window.location.search);
+    const shortId = params.get("c");
+    const importCode = params.get("import");
 
-      // Remove the param from URL without reloading
+    // Clean URL immediately
+    if (shortId || importCode) {
       const url = new URL(window.location.href);
+      url.searchParams.delete("c");
       url.searchParams.delete("import");
       window.history.replaceState({}, "", url.toString());
+    }
 
-      const payload = fromShareCode(importCode);
-      if (!payload || !payload.comp) return;
+    if (shortId) {
+      // Full comp with photos — fetch from server
+      fetchComp(shortId)
+        .then((payload) => {
+          if (!payload || !payload.comp) return;
+          const imported = {
+            ...payload.comp,
+            id: `comp-${Date.now()}`,
+            canonicalId: payload.comp.canonicalId || payload.comp.id,
+            importedAt: new Date().toISOString(),
+            sessions: [],
+            isLite: false,
+          };
+          setComps((prev) => [...prev, imported]);
+          setActiveComp(imported);
+          setScreen("pre-run");
+        })
+        .catch((err) => console.error("Failed to load comp from QR:", err));
+      return;
+    }
 
-      const imported = {
-        ...payload.comp,
-        id: `comp-${Date.now()}`,
-        canonicalId: payload.comp.canonicalId || payload.comp.id,
-        importedAt: new Date().toISOString(),
-        sessions: [],
-        isLite: payload.lite || false,
-      };
-
-      setComps((prev) => [...prev, imported]);
-      setActiveComp(imported);
-      setScreen("pre-run");
-    } catch {}
+    if (importCode) {
+      // Lite code (no photos) — decode inline
+      try {
+        const payload = fromShareCode(importCode);
+        if (!payload || !payload.comp) return;
+        const imported = {
+          ...payload.comp,
+          id: `comp-${Date.now()}`,
+          canonicalId: payload.comp.canonicalId || payload.comp.id,
+          importedAt: new Date().toISOString(),
+          sessions: [],
+          isLite: payload.lite || false,
+        };
+        setComps((prev) => [...prev, imported]);
+        setActiveComp(imported);
+        setScreen("pre-run");
+      } catch {}
+    }
   }, []);
 
   const [saveError, setSaveError] = useState("");
@@ -471,12 +544,22 @@ function CreateCompScreen({ onBack, onCreate }) {
       setImageUploadError(`Image is ${(file.size / 1024 / 1024).toFixed(1)} MB — large images may fail to save. Consider resizing it first.`);
     }
     const reader = new FileReader();
-    reader.onload = (ev) => {
-      setBoulders((prev) => {
-        const updated = [...prev];
-        updated[currentBoulder] = { ...updated[currentBoulder], imageUrl: String(ev.target.result) };
-        return updated;
-      });
+    reader.onload = async (ev) => {
+      try {
+        const compressed = await compressImage(String(ev.target.result), 900, 0.65);
+        setBoulders((prev) => {
+          const updated = [...prev];
+          updated[currentBoulder] = { ...updated[currentBoulder], imageUrl: compressed };
+          return updated;
+        });
+      } catch {
+        // fallback to uncompressed
+        setBoulders((prev) => {
+          const updated = [...prev];
+          updated[currentBoulder] = { ...updated[currentBoulder], imageUrl: String(ev.target.result) };
+          return updated;
+        });
+      }
     };
     reader.onerror = () => {
       setImageUploadError(`Failed to read image: ${reader.error ? reader.error.message : "unknown error"} (code ${reader.error ? reader.error.code : "?"})`);
@@ -743,10 +826,13 @@ function TimePicker({ label, valueSeconds, onChange, presets }) {
 
 function PreRunScreen({ comp, allComps, onBack, onStartRun }) {
   const [players, setPlayers] = useState([""]);
-  const [showShareCode, setShowShareCode] = useState(true); // show by default
-  const [shareTab, setShareTab] = useState("qr"); // "qr" | "code"
+  const [showShareCode, setShowShareCode] = useState(true);
+  const [shareTab, setShareTab] = useState("photos"); // "photos" | "nophotos" | "text"
   const [copied, setCopied] = useState(false);
   const [showTimingSettings, setShowTimingSettings] = useState(false);
+  const [uploadState, setUploadState] = useState("idle"); // "idle"|"uploading"|"done"|"error"
+  const [uploadedQrUrl, setUploadedQrUrl] = useState("");
+  const [uploadError, setUploadError] = useState("");
 
   // Timing settings (in seconds)
   const [preclimbTime, setPreclimbTime] = useState(10);
@@ -819,7 +905,7 @@ function PreRunScreen({ comp, allComps, onBack, onStartRun }) {
         </button>
       </div>
 
-      {/* Share — QR code + full text code */}
+      {/* Share panel */}
       <div className="bg-gradient-to-br from-cyan-900/40 to-blue-900/40 backdrop-blur-xl rounded-2xl p-6 border border-cyan-500/30 shadow-xl space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -828,79 +914,126 @@ function PreRunScreen({ comp, allComps, onBack, onStartRun }) {
             </div>
             <div>
               <h3 className="font-bold text-lg text-white">Share This Comp</h3>
-              <p className="text-xs text-slate-400">Others scan or paste code to compete & join your leaderboard</p>
+              <p className="text-xs text-slate-400">Scan QR or paste code to compete & join the leaderboard</p>
             </div>
           </div>
-          <button
-            onClick={() => setShowShareCode(!showShareCode)}
-            className="text-xs text-slate-400 hover:text-white"
-          >
+          <button onClick={() => setShowShareCode(!showShareCode)} className="text-xs text-slate-400 hover:text-white">
             {showShareCode ? "Hide" : "Show"}
           </button>
         </div>
 
         {showShareCode && (
           <>
-            {/* Tab switcher */}
+            {/* Tabs */}
             <div className="flex bg-slate-800/60 rounded-xl p-1 gap-1">
               <button
-                onClick={() => setShareTab("qr")}
-                className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-semibold transition-all ${
-                  shareTab === "qr" ? "bg-cyan-500 text-white shadow" : "text-slate-400 hover:text-white"
-                }`}
+                onClick={() => setShareTab("photos")}
+                className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all ${shareTab === "photos" ? "bg-cyan-500 text-white shadow" : "text-slate-400 hover:text-white"}`}
               >
-                <QrCode className="w-4 h-4" />
-                QR Code
+                📸 QR with Photos
               </button>
               <button
-                onClick={() => setShareTab("code")}
-                className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-semibold transition-all ${
-                  shareTab === "code" ? "bg-cyan-500 text-white shadow" : "text-slate-400 hover:text-white"
-                }`}
+                onClick={() => setShareTab("nophotos")}
+                className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all ${shareTab === "nophotos" ? "bg-cyan-500 text-white shadow" : "text-slate-400 hover:text-white"}`}
               >
-                <Copy className="w-4 h-4" />
-                Text Code
+                ⚡ QR Instant
+              </button>
+              <button
+                onClick={() => setShareTab("text")}
+                className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all ${shareTab === "text" ? "bg-cyan-500 text-white shadow" : "text-slate-400 hover:text-white"}`}
+              >
+                <Copy className="w-3 h-3 inline mr-1" />
+                Text
               </button>
             </div>
 
-            {shareTab === "qr" && (
+            {/* QR with Photos — uploads to server */}
+            {shareTab === "photos" && (
+              <div className="space-y-3">
+                {uploadState === "idle" && (
+                  <>
+                    <p className="text-xs text-slate-400">Upload your comp so others can scan a QR code and see the boulder photos.</p>
+                    <button
+                      onClick={async () => {
+                        setUploadState("uploading");
+                        setUploadError("");
+                        try {
+                          const id = await uploadComp(comp);
+                          setUploadedQrUrl(buildQrUrl(id));
+                          setUploadState("done");
+                        } catch (err) {
+                          setUploadError(`Upload failed: ${err.message}`);
+                          setUploadState("error");
+                        }
+                      }}
+                      className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 text-white py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 shadow-lg"
+                    >
+                      <QrCode className="w-4 h-4" />
+                      Generate QR with Photos
+                    </button>
+                  </>
+                )}
+
+                {uploadState === "uploading" && (
+                  <div className="text-center py-6 space-y-3">
+                    <div className="text-3xl animate-spin inline-block">⏳</div>
+                    <p className="text-sm text-slate-400">Uploading comp…</p>
+                  </div>
+                )}
+
+                {uploadState === "done" && uploadedQrUrl && (
+                  <div className="space-y-3">
+                    <div className="flex justify-center bg-white rounded-2xl p-5">
+                      <QRCodeSVG value={uploadedQrUrl} size={220} level="M" />
+                    </div>
+                    <p className="text-xs text-center text-slate-400">📷 Scan to open the comp with photos on any phone</p>
+                    <button
+                      onClick={async () => {
+                        try { await navigator.clipboard.writeText(uploadedQrUrl); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch {}
+                      }}
+                      className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 py-2 rounded-xl text-xs font-semibold transition-all flex items-center justify-center gap-2"
+                    >
+                      {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                      {copied ? "Copied!" : "Copy link"}
+                    </button>
+                    <button onClick={() => setUploadState("idle")} className="w-full text-xs text-slate-500 hover:text-slate-300">Regenerate</button>
+                  </div>
+                )}
+
+                {uploadState === "error" && (
+                  <div className="space-y-3">
+                    <div className="bg-red-900/40 border border-red-500/50 rounded-xl p-3 text-xs text-red-300">{uploadError}</div>
+                    <button onClick={() => setUploadState("idle")} className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 py-2 rounded-xl text-xs font-semibold">Try Again</button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* QR Instant — no photos, no upload */}
+            {shareTab === "nophotos" && (
               <div className="space-y-3">
                 <div className="flex justify-center bg-white rounded-2xl p-5">
-                  <QRCodeSVG
-                    value={buildQrUrl(comp)}
-                    size={220}
-                    level="M"
-                    includeMargin={false}
-                  />
+                  <QRCodeSVG value={buildLiteQrUrl(comp)} size={220} level="M" />
                 </div>
-                <p className="text-xs text-center text-slate-400">
-                  📷 Scan to open the comp instantly on any phone
-                </p>
-                <div className="bg-slate-800/50 rounded-xl p-3 text-xs text-slate-400 space-y-1">
-                  <div className="font-semibold text-slate-300">⚡ QR = in-person sharing</div>
-                  <div>Quick scan — no typing needed. Note: photos aren't included so climbers see the actual wall.</div>
+                <p className="text-xs text-center text-slate-400">⚡ Instant — no upload needed</p>
+                <div className="bg-slate-800/50 rounded-xl p-3 text-xs text-slate-400">
+                  <span className="text-slate-300 font-semibold">Best for in-person comps</span> — climbers see the actual boulders on the wall. Hold positions are included for scoring.
                 </div>
               </div>
             )}
 
-            {shareTab === "code" && (
+            {/* Text code — full with photos */}
+            {shareTab === "text" && (
               <div className="space-y-3">
-                <textarea
-                  value={shareCode}
-                  readOnly
-                  className="w-full bg-slate-800/50 rounded-xl p-4 text-xs min-h-[80px] border border-slate-700 font-mono text-slate-300"
-                />
+                <textarea value={shareCode} readOnly className="w-full bg-slate-800/50 rounded-xl p-4 text-xs min-h-[80px] border border-slate-700 font-mono text-slate-300" />
                 <button
                   onClick={handleCopy}
                   className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 text-white py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 shadow-lg"
                 >
                   {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                  {copied ? "Copied!" : "Copy Full Share Code"}
+                  {copied ? "Copied!" : "Copy Full Code"}
                 </button>
-                <div className="bg-slate-800/50 rounded-xl p-3 text-xs text-slate-400 space-y-1">
-                  <div className="font-semibold text-slate-300">📨 Text code = remote sharing</div>
-                  <div>Paste in iMessage, WhatsApp etc. Includes boulder photos for remote climbers.</div>
-                </div>
+                <p className="text-xs text-slate-500">Paste in iMessage, WhatsApp etc. Includes photos.</p>
               </div>
             )}
           </>
@@ -1060,7 +1193,10 @@ function RunScreen({ comp, sessions, timing, onUpdateSessions, onComplete, onExi
   const [showResults, setShowResults] = useState(false);
   const [shareCode, setShareCode] = useState("");
   const [copied, setCopied] = useState(false);
-  const [resultsShareTab, setResultsShareTab] = useState("qr");
+  const [resultsShareTab, setResultsShareTab] = useState("photos");
+  const [resultsUploadState, setResultsUploadState] = useState("idle");
+  const [resultsQrUrl, setResultsQrUrl] = useState("");
+  const [resultsUploadError, setResultsUploadError] = useState("");
 
   const currentSession = sessions[playerIdx];
   const boulder = comp.boulders[boulderIdx];
@@ -1217,49 +1353,64 @@ function RunScreen({ comp, sessions, timing, onUpdateSessions, onComplete, onExi
                 <h4 className="font-bold text-white">Share This Comp</h4>
               </div>
 
-              {/* Tab switcher */}
               <div className="flex bg-slate-900/60 rounded-xl p-1 gap-1">
-                <button
-                  onClick={() => setResultsShareTab("qr")}
-                  className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold transition-all ${
-                    resultsShareTab === "qr" ? "bg-cyan-500 text-white" : "text-slate-400 hover:text-white"
-                  }`}
-                >
-                  <QrCode className="w-3.5 h-3.5" />
-                  QR Code
-                </button>
-                <button
-                  onClick={() => setResultsShareTab("code")}
-                  className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold transition-all ${
-                    resultsShareTab === "code" ? "bg-cyan-500 text-white" : "text-slate-400 hover:text-white"
-                  }`}
-                >
-                  <Copy className="w-3.5 h-3.5" />
-                  Text Code
-                </button>
+                <button onClick={() => setResultsShareTab("photos")} className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all ${resultsShareTab === "photos" ? "bg-cyan-500 text-white" : "text-slate-400 hover:text-white"}`}>📸 QR with Photos</button>
+                <button onClick={() => setResultsShareTab("nophotos")} className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all ${resultsShareTab === "nophotos" ? "bg-cyan-500 text-white" : "text-slate-400 hover:text-white"}`}>⚡ QR Instant</button>
+                <button onClick={() => setResultsShareTab("text")} className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all ${resultsShareTab === "text" ? "bg-cyan-500 text-white" : "text-slate-400 hover:text-white"}`}>Text</button>
               </div>
 
-              {resultsShareTab === "qr" && (
+              {resultsShareTab === "photos" && (
                 <div className="space-y-3">
-                  <div className="flex justify-center bg-white rounded-2xl p-4">
-                    <QRCodeSVG value={buildQrUrl(comp)} size={180} level="M" />
-                  </div>
-                  <p className="text-xs text-center text-slate-400">📷 Scan to join — no typing needed</p>
+                  {resultsUploadState === "idle" && (
+                    <button
+                      onClick={async () => {
+                        setResultsUploadState("uploading");
+                        setResultsUploadError("");
+                        try {
+                          const id = await uploadComp(comp);
+                          setResultsQrUrl(buildQrUrl(id));
+                          setResultsUploadState("done");
+                        } catch (err) {
+                          setResultsUploadError(`Upload failed: ${err.message}`);
+                          setResultsUploadState("error");
+                        }
+                      }}
+                      className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 text-white py-3 rounded-xl font-semibold flex items-center justify-center gap-2"
+                    >
+                      <QrCode className="w-4 h-4" /> Generate QR with Photos
+                    </button>
+                  )}
+                  {resultsUploadState === "uploading" && <div className="text-center py-4 text-slate-400 text-sm">Uploading… ⏳</div>}
+                  {resultsUploadState === "done" && resultsQrUrl && (
+                    <div className="space-y-3">
+                      <div className="flex justify-center bg-white rounded-2xl p-4">
+                        <QRCodeSVG value={resultsQrUrl} size={180} level="M" />
+                      </div>
+                      <p className="text-xs text-center text-slate-400">📷 Scan to join with photos</p>
+                    </div>
+                  )}
+                  {resultsUploadState === "error" && (
+                    <div className="space-y-2">
+                      <div className="text-xs text-red-400 bg-red-900/30 border border-red-700 rounded-xl p-3">{resultsUploadError}</div>
+                      <button onClick={() => setResultsUploadState("idle")} className="w-full text-xs text-slate-400 hover:text-white py-2">Try Again</button>
+                    </div>
+                  )}
                 </div>
               )}
 
-              {resultsShareTab === "code" && (
+              {resultsShareTab === "nophotos" && (
                 <div className="space-y-3">
-                  <p className="text-xs text-slate-400">Share so others can compete on the same boulders and join the leaderboard!</p>
-                  <textarea
-                    value={shareCode}
-                    readOnly
-                    className="w-full bg-slate-900 rounded-xl p-3 text-xs min-h-[80px] border border-slate-700 font-mono text-slate-300"
-                  />
-                  <button
-                    onClick={handleCopyShareCode}
-                    className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 text-white py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 shadow-lg"
-                  >
+                  <div className="flex justify-center bg-white rounded-2xl p-4">
+                    <QRCodeSVG value={buildLiteQrUrl(comp)} size={180} level="M" />
+                  </div>
+                  <p className="text-xs text-center text-slate-400">⚡ Instant — no upload. Best for in-person.</p>
+                </div>
+              )}
+
+              {resultsShareTab === "text" && (
+                <div className="space-y-3">
+                  <textarea value={shareCode} readOnly className="w-full bg-slate-900 rounded-xl p-3 text-xs min-h-[80px] border border-slate-700 font-mono text-slate-300" />
+                  <button onClick={handleCopyShareCode} className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 text-white py-3 rounded-xl font-semibold flex items-center justify-center gap-2">
                     {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                     {copied ? "Copied!" : "Copy Share Code"}
                   </button>
