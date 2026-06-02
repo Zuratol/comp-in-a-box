@@ -1,5 +1,32 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Plus, Trash2, Users, Trophy, Home, ChevronLeft, Copy, Check, Settings, Mountain, Clock } from "lucide-react";
+import { Plus, Trash2, Users, Trophy, Home, ChevronLeft, Copy, Check, Settings, Mountain, Clock, QrCode } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
+
+const APP_URL = "https://compinbox.netlify.app";
+
+// Lite share code — no images, just structure. Small enough for a QR code.
+function toLiteShareCode(comp) {
+  const lite = {
+    comp: {
+      id: comp.id,
+      canonicalId: comp.canonicalId || comp.id,
+      name: comp.name,
+      boulders: comp.boulders.map((b) => ({
+        id: b.id,
+        name: b.name,
+        holds: b.holds,
+        // no imageUrl
+      })),
+      sessions: [],
+    },
+    lite: true, // flag so app knows photos are missing
+  };
+  return toShareCode(lite);
+}
+
+function buildQrUrl(comp) {
+  return `${APP_URL}/?import=${encodeURIComponent(toLiteShareCode(comp))}`;
+}
 
 // Speech helper
 function speak(text) {
@@ -65,6 +92,36 @@ export default function App() {
     try {
       const stored = localStorage.getItem("comps");
       if (stored) setComps(JSON.parse(stored));
+    } catch {}
+  }, []);
+
+  // Auto-import from QR code URL (?import=CODE)
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const importCode = params.get("import");
+      if (!importCode) return;
+
+      // Remove the param from URL without reloading
+      const url = new URL(window.location.href);
+      url.searchParams.delete("import");
+      window.history.replaceState({}, "", url.toString());
+
+      const payload = fromShareCode(importCode);
+      if (!payload || !payload.comp) return;
+
+      const imported = {
+        ...payload.comp,
+        id: `comp-${Date.now()}`,
+        canonicalId: payload.comp.canonicalId || payload.comp.id,
+        importedAt: new Date().toISOString(),
+        sessions: [],
+        isLite: payload.lite || false,
+      };
+
+      setComps((prev) => [...prev, imported]);
+      setActiveComp(imported);
+      setScreen("pre-run");
     } catch {}
   }, []);
 
@@ -687,6 +744,7 @@ function TimePicker({ label, valueSeconds, onChange, presets }) {
 function PreRunScreen({ comp, allComps, onBack, onStartRun }) {
   const [players, setPlayers] = useState([""]);
   const [showShareCode, setShowShareCode] = useState(true); // show by default
+  const [shareTab, setShareTab] = useState("qr"); // "qr" | "code"
   const [copied, setCopied] = useState(false);
   const [showTimingSettings, setShowTimingSettings] = useState(false);
 
@@ -761,16 +819,16 @@ function PreRunScreen({ comp, allComps, onBack, onStartRun }) {
         </button>
       </div>
 
-      {/* Share code — prominent at the top */}
+      {/* Share — QR code + full text code */}
       <div className="bg-gradient-to-br from-cyan-900/40 to-blue-900/40 backdrop-blur-xl rounded-2xl p-6 border border-cyan-500/30 shadow-xl space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-cyan-500/20 rounded-lg">
-              <Copy className="w-5 h-5 text-cyan-400" />
+              <QrCode className="w-5 h-5 text-cyan-400" />
             </div>
             <div>
-              <h3 className="font-bold text-lg text-white">Share Code</h3>
-              <p className="text-xs text-slate-400">Give this to others so they can compete on the same boulders & join your leaderboard</p>
+              <h3 className="font-bold text-lg text-white">Share This Comp</h3>
+              <p className="text-xs text-slate-400">Others scan or paste code to compete & join your leaderboard</p>
             </div>
           </div>
           <button
@@ -783,18 +841,68 @@ function PreRunScreen({ comp, allComps, onBack, onStartRun }) {
 
         {showShareCode && (
           <>
-            <textarea
-              value={shareCode}
-              readOnly
-              className="w-full bg-slate-800/50 rounded-xl p-4 text-xs min-h-[80px] border border-slate-700 font-mono text-slate-300"
-            />
-            <button
-              onClick={handleCopy}
-              className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 text-white py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 shadow-lg"
-            >
-              {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-              {copied ? "Copied!" : "Copy Share Code"}
-            </button>
+            {/* Tab switcher */}
+            <div className="flex bg-slate-800/60 rounded-xl p-1 gap-1">
+              <button
+                onClick={() => setShareTab("qr")}
+                className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-semibold transition-all ${
+                  shareTab === "qr" ? "bg-cyan-500 text-white shadow" : "text-slate-400 hover:text-white"
+                }`}
+              >
+                <QrCode className="w-4 h-4" />
+                QR Code
+              </button>
+              <button
+                onClick={() => setShareTab("code")}
+                className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-semibold transition-all ${
+                  shareTab === "code" ? "bg-cyan-500 text-white shadow" : "text-slate-400 hover:text-white"
+                }`}
+              >
+                <Copy className="w-4 h-4" />
+                Text Code
+              </button>
+            </div>
+
+            {shareTab === "qr" && (
+              <div className="space-y-3">
+                <div className="flex justify-center bg-white rounded-2xl p-5">
+                  <QRCodeSVG
+                    value={buildQrUrl(comp)}
+                    size={220}
+                    level="M"
+                    includeMargin={false}
+                  />
+                </div>
+                <p className="text-xs text-center text-slate-400">
+                  📷 Scan to open the comp instantly on any phone
+                </p>
+                <div className="bg-slate-800/50 rounded-xl p-3 text-xs text-slate-400 space-y-1">
+                  <div className="font-semibold text-slate-300">⚡ QR = in-person sharing</div>
+                  <div>Quick scan — no typing needed. Note: photos aren't included so climbers see the actual wall.</div>
+                </div>
+              </div>
+            )}
+
+            {shareTab === "code" && (
+              <div className="space-y-3">
+                <textarea
+                  value={shareCode}
+                  readOnly
+                  className="w-full bg-slate-800/50 rounded-xl p-4 text-xs min-h-[80px] border border-slate-700 font-mono text-slate-300"
+                />
+                <button
+                  onClick={handleCopy}
+                  className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 text-white py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 shadow-lg"
+                >
+                  {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  {copied ? "Copied!" : "Copy Full Share Code"}
+                </button>
+                <div className="bg-slate-800/50 rounded-xl p-3 text-xs text-slate-400 space-y-1">
+                  <div className="font-semibold text-slate-300">📨 Text code = remote sharing</div>
+                  <div>Paste in iMessage, WhatsApp etc. Includes boulder photos for remote climbers.</div>
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -844,6 +952,17 @@ function PreRunScreen({ comp, allComps, onBack, onStartRun }) {
               { label: "5 min", value: 5 * 60 },
             ]}
           />
+        </div>
+      )}
+
+      {/* Lite comp notice (scanned from QR — no photos) */}
+      {comp.isLite && (
+        <div className="bg-orange-900/30 border border-orange-500/50 rounded-2xl p-4 text-sm text-orange-200 flex items-start gap-3">
+          <span className="text-xl">📷</span>
+          <div>
+            <div className="font-semibold text-orange-300 mb-1">Scanned via QR — no photos</div>
+            <div className="text-xs text-orange-300/80">Boulder photos aren't included in QR codes. You can see the boulders on the wall! Hold positions are marked for scoring.</div>
+          </div>
         </div>
       )}
 
@@ -941,6 +1060,7 @@ function RunScreen({ comp, sessions, timing, onUpdateSessions, onComplete, onExi
   const [showResults, setShowResults] = useState(false);
   const [shareCode, setShareCode] = useState("");
   const [copied, setCopied] = useState(false);
+  const [resultsShareTab, setResultsShareTab] = useState("qr");
 
   const currentSession = sessions[playerIdx];
   const boulder = comp.boulders[boulderIdx];
@@ -1093,24 +1213,58 @@ function RunScreen({ comp, sessions, timing, onUpdateSessions, onComplete, onExi
 
             <div className="bg-gradient-to-br from-cyan-900/40 to-blue-900/40 rounded-2xl p-5 space-y-4 border border-cyan-500/30">
               <div className="flex items-center gap-2">
-                <Copy className="w-5 h-5 text-cyan-400" />
+                <QrCode className="w-5 h-5 text-cyan-400" />
                 <h4 className="font-bold text-white">Share This Comp</h4>
               </div>
-              <p className="text-xs text-slate-400">
-                Share this code so others can compete on the same boulders and join the leaderboard!
-              </p>
-              <textarea
-                value={shareCode}
-                readOnly
-                className="w-full bg-slate-900 rounded-xl p-3 text-xs min-h-[80px] border border-slate-700 font-mono text-slate-300"
-              />
-              <button
-                onClick={handleCopyShareCode}
-                className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 text-white py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 shadow-lg"
-              >
-                {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                {copied ? "Copied!" : "Copy Share Code"}
-              </button>
+
+              {/* Tab switcher */}
+              <div className="flex bg-slate-900/60 rounded-xl p-1 gap-1">
+                <button
+                  onClick={() => setResultsShareTab("qr")}
+                  className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold transition-all ${
+                    resultsShareTab === "qr" ? "bg-cyan-500 text-white" : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  <QrCode className="w-3.5 h-3.5" />
+                  QR Code
+                </button>
+                <button
+                  onClick={() => setResultsShareTab("code")}
+                  className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-semibold transition-all ${
+                    resultsShareTab === "code" ? "bg-cyan-500 text-white" : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  Text Code
+                </button>
+              </div>
+
+              {resultsShareTab === "qr" && (
+                <div className="space-y-3">
+                  <div className="flex justify-center bg-white rounded-2xl p-4">
+                    <QRCodeSVG value={buildQrUrl(comp)} size={180} level="M" />
+                  </div>
+                  <p className="text-xs text-center text-slate-400">📷 Scan to join — no typing needed</p>
+                </div>
+              )}
+
+              {resultsShareTab === "code" && (
+                <div className="space-y-3">
+                  <p className="text-xs text-slate-400">Share so others can compete on the same boulders and join the leaderboard!</p>
+                  <textarea
+                    value={shareCode}
+                    readOnly
+                    className="w-full bg-slate-900 rounded-xl p-3 text-xs min-h-[80px] border border-slate-700 font-mono text-slate-300"
+                  />
+                  <button
+                    onClick={handleCopyShareCode}
+                    className="w-full bg-gradient-to-r from-cyan-500 to-blue-500 hover:from-cyan-600 hover:to-blue-600 text-white py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-2 shadow-lg"
+                  >
+                    {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                    {copied ? "Copied!" : "Copy Share Code"}
+                  </button>
+                </div>
+              )}
             </div>
 
             <button
